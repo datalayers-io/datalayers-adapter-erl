@@ -1,0 +1,13 @@
+[package]
+name = "datalayers-adapter-nif"
+version = "0.1.0"
+edition = "2024"
+
+build-dependencies = []
+
+[lib]
+name = "datalayers_nif"
+crate-type = ["dylib"]
+
+[dependencies]
+rustler = "0.36.2"

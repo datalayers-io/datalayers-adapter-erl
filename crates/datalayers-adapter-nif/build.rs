@@ -12,10 +12,11 @@ fn main() {
     // debug or release
     let profile = env::var("PROFILE").unwrap();
     // We use target OS to determine if extension is `.so`, `.dll`, or `.dylib`
+    // FIXME: the target file name setting here not work
     let file_name = match env::var("CARGO_CFG_TARGET_OS").unwrap().as_str() {
-        "windows" => "datalayers_nif.dll",
-        "macos" | "ios" => "libdatalayers_nif.dylib",
-        _ => "libdatalayers_nif.so",
+        "windows" => "datalayers.dll",
+        "macos" | "ios" => "libdatalayers.dylib",
+        _ => "libdatalayers.so",
     };
 
     println!("cargo:warning=filename: {:?}", &file_name);
@@ -28,7 +29,7 @@ fn main() {
     libpath = libpath.join(&profile).join(&file_name);
 
     // Create file in `here` and write the path to the directory of
-    // where to find datalayers_nif
+    // where to find datalayers
     let libpath_file_path = Path::new(&here).join("libpath");
     let mut libpath_file = File::create(libpath_file_path).unwrap();
     write!(libpath_file, "{}", libpath.to_str().unwrap()).unwrap();

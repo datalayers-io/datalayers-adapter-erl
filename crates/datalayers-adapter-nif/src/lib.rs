@@ -1,14 +1,20 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+extern crate core;
+extern crate rustler;
+
+mod atoms;
+
+use atoms::ok;
+use rustler::{Env, Term};
+
+rustler::init!("libdatalayers", load = on_load);
+
+#[rustler::nif]
+
+fn hello() -> rustler::Atom {
+    println!("Hello, world!");
+    ok()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+pub fn on_load(_env: Env, _load_info: Term) -> bool {
+    true
 }

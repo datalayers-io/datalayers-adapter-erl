@@ -1,0 +1,3 @@
+rustler::atoms! {
+    ok,
+}

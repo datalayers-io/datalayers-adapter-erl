@@ -1,8 +1,8 @@
-use std::process::exit;
+use std::error::Error;
 use std::sync::Arc;
 
 use arrow_array::{
-    Float32Array, Int32Array, Int64Array, Int8Array, RecordBatch, TimestampMillisecondArray,
+    Float32Array, Int8Array, Int32Array, Int64Array, RecordBatch, TimestampMillisecondArray,
 };
 use arrow_cast::pretty::pretty_format_batches;
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
@@ -36,17 +36,17 @@ pub fn print_affected_rows(batches: &[RecordBatch]) {
     println!("Affected rows: {}", affected_rows);
 }
 
-pub fn print_batches(batches: &[RecordBatch]) {
-    let formatted = pretty_format_batches(batches)
-        .inspect_err(|e| {
-            println!("Failed to print batches: {}", e);
-            exit(1)
-        })
-        .unwrap();
+pub fn print_batches(batches: &[RecordBatch]) -> Result<(), Box<dyn Error>> {
+    let formatted = pretty_format_batches(batches).map_err(|e| {
+        eprintln!("Failed to format batches: {}", e);
+        e
+    })?;
+
     println!("{}", formatted);
+    Ok(())
 }
 
-pub fn make_insert_binding() -> RecordBatch {
+pub fn make_insert_binding() -> Result<RecordBatch, Box<dyn Error>> {
     let schema = Arc::new(Schema::new(vec![
         Field::new(
             "ts",
@@ -83,20 +83,17 @@ pub fn make_insert_binding() -> RecordBatch {
         schema,
         [ts_array, sid_array, value_array, flag_array].into(),
     )
-    .inspect_err(|e| {
-        println!("Failed to build a record batch: {}", e);
-        exit(1)
+    .map_err(|e| {
+        eprintln!("Failed to build a record batch: {}", e);
+        e.into() // 将错误转换为 Box<dyn Error>
     })
-    .unwrap()
 }
 
-pub fn make_query_binding(sid: i32) -> RecordBatch {
+pub fn make_query_binding(sid: i32) -> Result<RecordBatch, Box<dyn Error>> {
     let schema = Arc::new(Schema::new(vec![Field::new("sid", DataType::Int32, true)]));
     let sid_array = Arc::new(Int32Array::from(vec![Some(sid)])) as _;
-    RecordBatch::try_new(schema, [sid_array].into())
-        .inspect_err(|e| {
-            println!("Failed to build a record batch: {}", e);
-            exit(1)
-        })
-        .unwrap()
+    RecordBatch::try_new(schema, [sid_array].into()).map_err(|e| {
+        eprintln!("Failed to build a record batch: {}", e);
+        e.into()
+    })
 }

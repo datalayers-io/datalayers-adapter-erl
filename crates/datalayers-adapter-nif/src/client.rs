@@ -1,12 +1,12 @@
-use std::{process::exit, str::FromStr, time::Duration};
+use std::{str::FromStr, time::Duration};
 
 use crate::util::filter_message;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use arrow_array::RecordBatch;
 use arrow_flight::{
-    sql::client::{FlightSqlServiceClient, PreparedStatement},
     Ticket,
+    sql::client::{FlightSqlServiceClient, PreparedStatement},
 };
 use futures::TryStreamExt;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
@@ -64,10 +64,10 @@ impl Client {
         let _ = flight_sql_client
             .handshake(&config.username, &config.password)
             .await
-            .inspect_err(|e| {
-                println!("{}", filter_message(&e.to_string()));
-                exit(1)
-            });
+            .map_err(|e| {
+                eprintln!("{}", filter_message(&e.to_string()));
+                e
+            })?;
 
         Ok(Self {
             inner: flight_sql_client,
@@ -83,9 +83,9 @@ impl Client {
             .inner
             .execute(sql.to_string(), None)
             .await
-            .inspect_err(|e| {
-                println!("{}", filter_message(&e.to_string()));
-                exit(1)
+            .map_err(|e| {
+                eprintln!("{}", filter_message(&e.to_string()));
+                e
             })?;
         let ticket = flight_info
             .endpoint
@@ -103,9 +103,9 @@ impl Client {
             .inner
             .execute_update(sql.to_string(), None)
             .await
-            .inspect_err(|e| {
-                println!("{}", filter_message(&e.to_string()));
-                exit(1)
+            .map_err(|e| {
+                eprintln!("{}", filter_message(&e.to_string()));
+                e
             })?;
         Ok(affected_rows)
     }
@@ -115,9 +115,9 @@ impl Client {
             .inner
             .prepare(sql.to_string(), None)
             .await
-            .inspect_err(|e| {
-                println!("{}", filter_message(&e.to_string()));
-                exit(1)
+            .map_err(|e| {
+                eprintln!("{}", filter_message(&e.to_string()));
+                e
             })?;
         Ok(prepared_stmt)
     }
@@ -130,9 +130,9 @@ impl Client {
         prepared_stmt
             .set_parameters(binding)
             .context("Failed to bind a record batch to the prepared statement")?;
-        let flight_info = prepared_stmt.execute().await.inspect_err(|e| {
-            println!("{}", filter_message(&e.to_string()));
-            exit(1)
+        let flight_info = prepared_stmt.execute().await.map_err(|e| {
+            eprintln!("{}", filter_message(&e.to_string()));
+            e
         })?;
         let ticket = flight_info
             .endpoint
@@ -153,13 +153,13 @@ impl Client {
     }
 
     async fn do_get(&mut self, ticket: Ticket) -> Result<Vec<RecordBatch>> {
-        let stream = self.inner.do_get(ticket).await.inspect_err(|e| {
-            println!("{}", filter_message(&e.to_string()));
-            exit(1)
+        let stream = self.inner.do_get(ticket).await.map_err(|e| {
+            eprintln!("{}", filter_message(&e.to_string()));
+            e
         })?;
-        let batches = stream.try_collect::<Vec<_>>().await.inspect_err(|e| {
-            println!("{}", filter_message(&e.to_string()));
-            exit(1)
+        let batches = stream.try_collect::<Vec<_>>().await.map_err(|e| {
+            eprintln!("{}", filter_message(&e.to_string()));
+            e
         })?;
         if batches.is_empty() {
             bail!("Unexpected empty batches");

@@ -7,12 +7,14 @@ mod util;
 
 use atoms::ok;
 use client::{Client, ClientConfig};
+// use std::io::Error as IoError;
+// use std::io::ErrorKind as IoErrorKind;
 use util::*;
 
-use rustler::{Env, Term};
 use anyhow::Result;
-use tokio::runtime::Runtime;
 use lazy_static::lazy_static;
+use rustler::{Atom, Env, Term};
+use tokio::runtime::Runtime;
 
 rustler::init!("libdatalayers", load = on_load);
 
@@ -21,7 +23,7 @@ lazy_static! {
 }
 
 #[rustler::nif]
-fn hello() -> rustler::Atom {
+fn hello() -> Atom {
     println!("Hello, world!");
     let _res = RT.block_on(do_hello());
     ok()
@@ -103,23 +105,23 @@ async fn do_hello() -> Result<()> {
     // | 2024-09-01T10:20:00+08:00 | 5   | 30.0  | 0    |
     // | 2024-09-01T10:00:00+08:00 | 1   | 12.5  | 0    |
     // +---------------------------+-----+-------+------+
-    print_batches(&result);
+    _ = print_batches(&result);
 
     // Inserts some data with prepared statement.
     sql = "INSERT INTO rust.demo (ts, sid, value, flag) VALUES (?, ?, ?, ?);";
     let mut prepared_stmt = client.prepare(sql).await?;
-    let mut binding = make_insert_binding();
+    let mut binding = make_insert_binding().unwrap();
     result = client.execute_prepared(&mut prepared_stmt, binding).await?;
     // The result should be:
     // Affected rows: 5
-    print_affected_rows(&result);
+    _ = print_affected_rows(&result);
 
     // Queries the inserted data with prepared statement.
     sql = "SELECT * FROM rust.demo WHERE sid = ?";
     prepared_stmt = client.prepare(sql).await?;
 
     // Retrieves all rows with `sid` = 1.
-    binding = make_query_binding(1);
+    binding = make_query_binding(1).unwrap();
     result = client.execute_prepared(&mut prepared_stmt, binding).await?;
     // The result should be:
     // +---------------------------+-----+-------+------+
@@ -128,10 +130,10 @@ async fn do_hello() -> Result<()> {
     // | 2024-09-01T10:00:00+08:00 | 1   | 12.5  | 0    |
     // | 2024-09-02T10:00:00+08:00 | 1   | 12.5  | 0    |
     // +---------------------------+-----+-------+------+
-    print_batches(&result);
+    _ = print_batches(&result);
 
     // Retrieves all rows with `sid` = 2.
-    binding = make_query_binding(2);
+    binding = make_query_binding(2).unwrap();
     result = client.execute_prepared(&mut prepared_stmt, binding).await?;
     // The result should be:
     // +---------------------------+-----+-------+------+
@@ -140,7 +142,7 @@ async fn do_hello() -> Result<()> {
     // | 2024-09-01T10:05:00+08:00 | 2   | 15.3  | 1    |
     // | 2024-09-02T10:05:00+08:00 | 2   | 15.3  | 1    |
     // +---------------------------+-----+-------+------+
-    print_batches(&result);
+    _ = print_batches(&result);
 
     // Closes the prepared statement to notify releasing resources on server side.
     client.close_prepared(prepared_stmt).await?;
@@ -169,7 +171,7 @@ async fn do_hello() -> Result<()> {
     // | 2024-09-03T10:00:00+08:00 | 1   | 4.5   | 0    |
     // | 2024-09-03T10:05:00+08:00 | 2   | 11.6  | 1    |
     // +---------------------------+-----+-------+------+
-    print_batches(&result);
+    _ = print_batches(&result);
 
     Ok(())
 }

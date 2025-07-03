@@ -1,6 +1,7 @@
 -module(libdatalayers).
 
--export([load/0, connect/1, execute/2]).
+-export([load/0, 
+         connect/1, execute/2, stop/1]).
 -on_load(load/0).
 
 load() ->
@@ -10,6 +11,9 @@ connect(_Opts) ->
     not_loaded(?LINE).
 
 execute(_Client, _Sql) ->
+    not_loaded(?LINE).
+
+stop(_Client) ->
     not_loaded(?LINE).
 
 not_loaded(Line) ->

@@ -7,7 +7,7 @@ mod resource;
 mod util;
 
 use crate::resource::ClientResource;
-use atoms::{error, ok};
+use atoms::*;
 use client::{Client, ClientConfig};
 use lazy_static::lazy_static;
 use rustler::{Encoder, Env, MapIterator, Term};
@@ -96,6 +96,19 @@ fn execute<'a>(env: Env<'a>, resource: Term<'a>, sql: String) -> Term<'a> {
     } else {
         (error(), client_stopped()).encode(env)
     }
+}
 
+#[rustler::nif]
+fn stop(resource: Term) -> rustler::Atom {
+    let client_resource: rustler::ResourceArc<ClientResource> = match resource.decode() {
+        Ok(r) => r,
+        Err(_) => return error(),
+    };
+
+    let mut client_guard = client_resource.0.lock().unwrap();
+    if let Some(client) = client_guard.take() {
+        RT.block_on(client.stop());
     }
+
+    ok()
 }

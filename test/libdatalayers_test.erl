@@ -19,3 +19,22 @@ connect_test_() ->
             {ok, _} = libdatalayers:execute(Client, <<"DROP DATABASE eunit_test">>)
         end
     }.
+
+stop_test_() ->
+    {
+        "Stop client",
+        fun() ->
+            Host = <<"172.19.0.30">>,
+            Port = 8360,
+            Username = <<"admin">>,
+            Password = <<"public">>,
+            {ok, Client} = libdatalayers:connect(#{
+                host => Host,
+                port => Port,
+                username => Username,
+                password => Password
+            }),
+            ok = libdatalayers:stop(Client),
+            {error, client_stopped} = libdatalayers:execute(Client, <<"CREATE DATABASE eunit_test">>)
+        end
+    }.

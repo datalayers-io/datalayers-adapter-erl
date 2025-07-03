@@ -92,6 +92,12 @@ impl Client {
         Ok(batches)
     }
 
+    pub async fn stop(self) {
+        // By taking ownership of self, this method consumes the Client.
+        // When the method returns, self is dropped, and the underlying
+        // gRPC channel is closed.
+    }
+
     // pub async fn execute_update(&mut self, sql: &str) -> Result<i64> {
     //     let affected_rows = self
     //         .inner

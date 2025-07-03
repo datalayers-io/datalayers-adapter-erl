@@ -1,3 +1,4 @@
 rustler::atoms! {
     ok,
+    error,
 }

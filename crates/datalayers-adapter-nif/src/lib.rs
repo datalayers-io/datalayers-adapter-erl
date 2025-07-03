@@ -3,17 +3,14 @@ extern crate rustler;
 
 mod atoms;
 mod client;
+mod resource;
 mod util;
 
-use atoms::ok;
+use crate::resource::ClientResource;
+use atoms::{error, ok};
 use client::{Client, ClientConfig};
-// use std::io::Error as IoError;
-// use std::io::ErrorKind as IoErrorKind;
-use util::*;
-
-use anyhow::Result;
 use lazy_static::lazy_static;
-use rustler::{Atom, Env, Term};
+use rustler::{Encoder, Env, MapIterator, Term};
 use tokio::runtime::Runtime;
 
 rustler::init!("libdatalayers", load = on_load);
@@ -22,156 +19,83 @@ lazy_static! {
     static ref RT: Runtime = Runtime::new().unwrap();
 }
 
-#[rustler::nif]
-fn hello() -> Atom {
-    println!("Hello, world!");
-    let _res = RT.block_on(do_hello());
-    ok()
-}
-
-pub fn on_load(_env: Env, _load_info: Term) -> bool {
+pub fn on_load(env: Env, _load_info: Term) -> bool {
+    let _ = env.register::<ClientResource>();
     true
 }
 
-async fn do_hello() -> Result<()> {
-    // Sets the TLS_CERT env var to the path of the certificate file if you want to use TLS.
-    let tls_cert = std::env::var("TLS_CERT").ok();
+#[rustler::nif]
+fn connect<'a>(env: Env<'a>, term: Term<'a>) -> Term<'a> {
+    let iter = match MapIterator::new(term) {
+        Some(iter) => iter,
+        None => return (error(), "invalid_map").encode(env),
+    };
 
-    // Creates a client configured for Datalayers.
+    let mut host = "127.0.0.1".to_string();
+    let mut port = 8360;
+    let mut username = "admin".to_string();
+    let mut password = "public".to_string();
+
+    for (key, value) in iter {
+        let key_str = match key.atom_to_string() {
+            Ok(key) => key,
+            Err(_) => return (error(), "invalid_key").encode(env),
+        };
+        match key_str.as_str() {
+            "host" => match value.decode::<String>() {
+                Ok(h) => host = h,
+                Err(_) => return (error(), "invalid_host").encode(env),
+            },
+            "port" => match value.decode::<u32>() {
+                Ok(p) => port = p,
+                Err(_) => return (error(), "invalid_port").encode(env),
+            },
+            "username" => match value.decode::<String>() {
+                Ok(u) => username = u,
+                Err(_) => return (error(), "invalid_username").encode(env),
+            },
+            "password" => match value.decode::<String>() {
+                Ok(p) => password = p,
+                Err(_) => return (error(), "invalid_password").encode(env),
+            },
+            _ => (),
+        }
+    }
+
+    let tls_cert = std::env::var("TLS_CERT").ok();
     let config = ClientConfig {
-        host: "172.19.0.30".to_string(),
-        port: 8360,
-        username: "admin".to_string(),
-        password: "public".to_string(),
+        host,
+        port,
+        username,
+        password,
         tls_cert,
     };
-    let mut client = Client::try_new(&config).await?;
 
-    // Creates a database `rust`.
-    let mut sql = "CREATE DATABASE rust";
-    let mut result = client.execute(sql).await?;
-    // The result should be:
-    // Affected rows: 0
-    print_affected_rows(&result);
+    let client = match RT.block_on(Client::try_new(&config)) {
+        Ok(client) => client,
+        Err(e) => return (error(), e.to_string()).encode(env),
+    };
 
-    // Optional: sets the database header for each outgoing request to `rust`.
-    // The Datalayers server uses this header to identify the associated table of a request.
-    //
-    // This setting is optional since the following SQLs contain the database context
-    // and the server could parse the database context from SQLs.
-    client.use_database("rust");
+    (ok(), ClientResource::new(client)).encode(env)
+}
 
-    // Creates a table `demo` within the database `rust`.
-    sql = r#"
-        CREATE TABLE rust.demo (
-            ts TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            sid INT32,
-            value REAL,
-            flag INT8,
-            timestamp key(ts)
-        )
-        PARTITION BY HASH(sid) PARTITIONS 8
-        ENGINE=TimeSeries;
-    "#;
-    result = client.execute(sql).await?;
-    // The result should be:
-    // Affected rows: 0
-    print_affected_rows(&result);
+#[rustler::nif]
+fn execute<'a>(env: Env<'a>, resource: Term<'a>, sql: String) -> Term<'a> {
+    let client_resource: rustler::ResourceArc<ClientResource> = match resource.decode() {
+        Ok(r) => r,
+        Err(_) => return (error(), "invalid_client_resource").encode(env),
+    };
 
-    // Inserts some data.
-    sql = r#"
-        INSERT INTO rust.demo (ts, sid, value, flag) VALUES
-            ('2024-09-01T10:00:00+08:00', 1, 12.5, 0),
-            ('2024-09-01T10:05:00+08:00', 2, 15.3, 1),
-            ('2024-09-01T10:10:00+08:00', 3, 9.8, 0),
-            ('2024-09-01T10:15:00+08:00', 4, 22.1, 1),
-            ('2024-09-01T10:20:00+08:00', 5, 30.0, 0);
-    "#;
-    result = client.execute(sql).await?;
-    // The result should be:
-    // Affected rows: 5
-    print_affected_rows(&result);
+    let mut client_guard = client_resource.0.lock().unwrap();
 
-    // Queries the inserted data
-    sql = "SELECT * FROM rust.demo";
-    result = client.execute(sql).await?;
-    // The result should be:
-    // +---------------------------+-----+-------+------+
-    // | ts                        | sid | value | flag |
-    // +---------------------------+-----+-------+------+
-    // | 2024-09-01T10:15:00+08:00 | 4   | 22.1  | 1    |
-    // | 2024-09-01T10:10:00+08:00 | 3   | 9.8   | 0    |
-    // | 2024-09-01T10:05:00+08:00 | 2   | 15.3  | 1    |
-    // | 2024-09-01T10:20:00+08:00 | 5   | 30.0  | 0    |
-    // | 2024-09-01T10:00:00+08:00 | 1   | 12.5  | 0    |
-    // +---------------------------+-----+-------+------+
-    _ = print_batches(&result);
+    if let Some(client) = &mut *client_guard {
+        match RT.block_on(client.execute(&sql)) {
+            Ok(result) => (ok(), util::to_term(&result[..], env)).encode(env),
+            Err(e) => (error(), e.to_string()).encode(env),
+        }
+    } else {
+        (error(), client_stopped()).encode(env)
+    }
 
-    // Inserts some data with prepared statement.
-    sql = "INSERT INTO rust.demo (ts, sid, value, flag) VALUES (?, ?, ?, ?);";
-    let mut prepared_stmt = client.prepare(sql).await?;
-    let mut binding = make_insert_binding().unwrap();
-    result = client.execute_prepared(&mut prepared_stmt, binding).await?;
-    // The result should be:
-    // Affected rows: 5
-    _ = print_affected_rows(&result);
-
-    // Queries the inserted data with prepared statement.
-    sql = "SELECT * FROM rust.demo WHERE sid = ?";
-    prepared_stmt = client.prepare(sql).await?;
-
-    // Retrieves all rows with `sid` = 1.
-    binding = make_query_binding(1).unwrap();
-    result = client.execute_prepared(&mut prepared_stmt, binding).await?;
-    // The result should be:
-    // +---------------------------+-----+-------+------+
-    // | ts                        | sid | value | flag |
-    // +---------------------------+-----+-------+------+
-    // | 2024-09-01T10:00:00+08:00 | 1   | 12.5  | 0    |
-    // | 2024-09-02T10:00:00+08:00 | 1   | 12.5  | 0    |
-    // +---------------------------+-----+-------+------+
-    _ = print_batches(&result);
-
-    // Retrieves all rows with `sid` = 2.
-    binding = make_query_binding(2).unwrap();
-    result = client.execute_prepared(&mut prepared_stmt, binding).await?;
-    // The result should be:
-    // +---------------------------+-----+-------+------+
-    // | ts                        | sid | value | flag |
-    // +---------------------------+-----+-------+------+
-    // | 2024-09-01T10:05:00+08:00 | 2   | 15.3  | 1    |
-    // | 2024-09-02T10:05:00+08:00 | 2   | 15.3  | 1    |
-    // +---------------------------+-----+-------+------+
-    _ = print_batches(&result);
-
-    // Closes the prepared statement to notify releasing resources on server side.
-    client.close_prepared(prepared_stmt).await?;
-
-    // There provides a dedicated interface `execute_update` for executing DMLs, including Insert, Delete.
-    // This interface directly returns the affected rows which might be convenient for some use cases.
-    //
-    // Note, Datalayers does not support Update and the development for Delete is in progress.
-    sql = r#"
-        INSERT INTO rust.demo (ts, sid, value, flag) VALUES
-            ('2024-09-03T10:00:00+08:00', 1, 4.5, 0),
-            ('2024-09-03T10:05:00+08:00', 2, 11.6, 1);
-    "#;
-    let affected_rows = client.execute_update(sql).await?;
-    // The output should be:
-    // Affected rows: 2
-    println!("Affected rows: {}", affected_rows);
-
-    // Checks that the data are inserted successfully.
-    sql = "SELECT * FROM rust.demo where ts >= '2024-09-03T10:00:00+08:00'";
-    result = client.execute(sql).await?;
-    // The result should be:
-    // +---------------------------+-----+-------+------+
-    // | ts                        | sid | value | flag |
-    // +---------------------------+-----+-------+------+
-    // | 2024-09-03T10:00:00+08:00 | 1   | 4.5   | 0    |
-    // | 2024-09-03T10:05:00+08:00 | 2   | 11.6  | 1    |
-    // +---------------------------+-----+-------+------+
-    _ = print_batches(&result);
-
-    Ok(())
+    }
 }

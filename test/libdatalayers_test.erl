@@ -1,0 +1,21 @@
+-module(libdatalayers_test).
+-include_lib("eunit/include/eunit.hrl").
+
+connect_test_() ->
+    {
+        "Connect and execute",
+        fun() ->
+            Host = <<"172.19.0.30">>,
+            Port = 8360,
+            Username = <<"admin">>,
+            Password = <<"public">>,
+            {ok, Client} = libdatalayers:connect(#{
+                host => Host,
+                port => Port,
+                username => Username,
+                password => Password
+            }),
+            {ok, _} = libdatalayers:execute(Client, <<"CREATE DATABASE eunit_test">>),
+            {ok, _} = libdatalayers:execute(Client, <<"DROP DATABASE eunit_test">>)
+        end
+    }.

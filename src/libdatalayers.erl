@@ -7,7 +7,9 @@
 load() ->
     erlang:load_nif(filename:join(priv(), "libdatalayers"), none).
 
+-spec connect(_Opts :: map()) -> {ok, _Client :: reference()} | {error, Reason :: binary()}.
 connect(_Opts) ->
+    %% maps:with([host, port, username, password, tls_cert], Opts)
     not_loaded(?LINE).
 
 execute(_Client, _Sql) ->

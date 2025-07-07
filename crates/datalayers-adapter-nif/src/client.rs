@@ -10,6 +10,7 @@ use futures::TryStreamExt;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 // use tonic::transport::channel::Channel;
 
+#[derive(rustler::NifMap)]
 /// The configuration for the client connecting to the Datalayers server via Arrow Flight SQL protocol.
 pub struct ClientConfig {
     /// The hostname of the Datalayers database server.

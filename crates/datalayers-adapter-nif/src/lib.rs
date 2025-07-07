@@ -24,8 +24,8 @@ pub fn on_load(env: Env, _load_info: Term) -> bool {
     true
 }
 
-#[rustler::nif]
-fn connect(env: Env, config: ClientConfig) -> Result<ResourceArc<ClientResource>, String> {
+#[rustler::nif(schedule = "DirtyIo")]
+fn connect_nif(config: ClientConfig) -> Result<ResourceArc<ClientResource>, String> {
     let client = match RT.block_on(Client::try_new(&config)) {
         Ok(client) => client,
         Err(e) => return Err(e.to_string()),
@@ -35,7 +35,7 @@ fn connect(env: Env, config: ClientConfig) -> Result<ResourceArc<ClientResource>
 }
 
 #[rustler::nif]
-fn execute<'a>(env: Env<'a>, resource: Term<'a>, sql: String) -> Term<'a> {
+fn execute_nif<'a>(env: Env<'a>, resource: Term<'a>, sql: String) -> Term<'a> {
     let client_resource: rustler::ResourceArc<ClientResource> = match resource.decode() {
         Ok(r) => r,
         Err(_) => return (error(), "invalid_client_resource").encode(env),
@@ -54,7 +54,7 @@ fn execute<'a>(env: Env<'a>, resource: Term<'a>, sql: String) -> Term<'a> {
 }
 
 #[rustler::nif]
-fn stop(resource: Term) -> rustler::Atom {
+fn stop_nif(resource: Term) -> rustler::Atom {
     let client_resource: rustler::ResourceArc<ClientResource> = match resource.decode() {
         Ok(r) => r,
         Err(_) => return error(),

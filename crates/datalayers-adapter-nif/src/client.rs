@@ -23,7 +23,7 @@ pub struct ClientConfig {
     pub password: String,
     /// The optional TLS certificate for secure connections.
     /// The certificate is self-signed by Datalayers and is used as the pem file by the client to certify itself.
-    pub tls_cert: Option<String>,
+    pub tls_cert: rustler::ErlOption<String>,
 }
 
 pub struct Client {
@@ -33,7 +33,7 @@ pub struct Client {
 
 impl Client {
     pub async fn try_new(config: &ClientConfig) -> Result<Self> {
-        let protocol = config.tls_cert.as_ref().map(|_| "https").unwrap_or("http");
+        let protocol = if config.tls_cert.is_some() { "https" } else { "http" };
         let uri = format!("{}://{}:{}", protocol, config.host, config.port);
         let mut endpoint = Endpoint::from_str(&uri)
             .context(format!("Failed to create an endpoint with uri {}", uri))?
@@ -41,7 +41,7 @@ impl Client {
             .keep_alive_while_idle(true);
 
         // Configures TLS if a certificate is provided.
-        if let Some(tls_cert) = &config.tls_cert {
+        if let Some(tls_cert) = &*config.tls_cert {
             let cert = std::fs::read_to_string(tls_cert)
                 .context(format!("Failed to read the TLS cert file {}", tls_cert))?;
             let cert = Certificate::from_pem(cert);

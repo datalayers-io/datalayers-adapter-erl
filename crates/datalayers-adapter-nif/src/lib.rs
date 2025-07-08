@@ -32,8 +32,17 @@ fn connect(config: ClientConfig) -> Result<ResourceArc<ClientResource>, String> 
     }
 }
 
+/// execute a SQL query using the client resource.
+/// Return the result as a term.
+/// example:
+/// ```erlang
+/// 0> datalayers:execute(Client, <<"SHOW DATABASES">>).
+/// {ok,[[<<"information_schema">>, <<"2025-07-08T17:37:16+08:00">>],
+///      [<<"rust">>,               <<"2025-06-20T11:15:32+08:00">>]
+///     ]} | {error, Reason}
+/// ```
 #[rustler::nif(schedule = "DirtyIo")]
-fn execute<'a>(env: Env<'a>, resource: Reference, sql: String) -> Result<Term<'a>, String> {
+fn execute(resource: Reference, sql: String) -> Result<Vec<Vec<String>>, String> {
     let client_resource: rustler::ResourceArc<ClientResource> = match resource.decode() {
         Ok(r) => r,
         Err(_) => return Err("invalid_client_resource".to_string()),
@@ -43,7 +52,7 @@ fn execute<'a>(env: Env<'a>, resource: Reference, sql: String) -> Result<Term<'a
 
     if let Some(client) = &mut *client_guard {
         match RT.block_on(client.execute(&sql)) {
-            Ok(result) => Ok(util::record_batch_to_term(&result[..], env)),
+            Ok(result) => Ok(util::record_batch_to_term(&result[..])),
             Err(e) => Err(e.to_string()),
         }
     } else {

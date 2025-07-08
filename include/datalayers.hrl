@@ -9,3 +9,6 @@
 -type sql() :: binary().
 -type result() :: list().
 -type reason() :: binary().
+
+-type prepared_statement() :: reference().
+-type params() :: list().

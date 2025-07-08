@@ -3,6 +3,11 @@
 -export([
     connect/1,
     execute/2,
+
+    prepare/2,
+    execute_prepare/3,
+    close_prepared/2,
+
     stop/1
 ]).
 
@@ -26,6 +31,15 @@ connect(_Opts) ->
     not_loaded(?LINE).
 
 execute(_Client, _Sql) ->
+    not_loaded(?LINE).
+
+prepare(_Client, _Sql) ->
+    not_loaded(?LINE).
+
+execute_prepare(_Client, _Statement, _Params) ->
+    not_loaded(?LINE).
+
+close_prepared(_Client, _Statement) ->
     not_loaded(?LINE).
 
 stop(_Client) ->

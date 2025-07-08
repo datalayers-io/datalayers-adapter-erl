@@ -6,7 +6,7 @@ mod client;
 mod resource;
 mod util;
 
-use crate::resource::ClientResource;
+use crate::resource::{ClientResource, PreparedStatementResource};
 use atoms::*;
 use client::{Client, ClientConfig};
 use lazy_static::lazy_static;
@@ -21,6 +21,7 @@ lazy_static! {
 
 pub fn on_load(env: Env, _load_info: Term) -> bool {
     let _ = env.register::<ClientResource>();
+    let _ = env.register::<PreparedStatementResource>();
     true
 }
 
@@ -60,14 +61,68 @@ fn execute(resource: Reference, sql: String) -> Result<Vec<Vec<String>>, String>
     }
 }
 
-#[rustler::nif]
-fn stop(resource: Reference) -> rustler::Atom {
-    let client_resource: rustler::ResourceArc<ClientResource> = match resource.decode() {
-        Ok(r) => r,
-        Err(_) => return error(),
-    };
-
+#[rustler::nif(schedule = "DirtyIo")]
+fn prepare(
+    client_resource: ResourceArc<ClientResource>,
+    sql: String,
+) -> Result<ResourceArc<PreparedStatementResource>, String> {
     let mut client_guard = client_resource.0.lock().unwrap();
+    if let Some(client) = &mut *client_guard {
+        match RT.block_on(client.prepare(&sql)) {
+            Ok(statement) => Ok(PreparedStatementResource::new(statement)),
+            Err(e) => Err(e.to_string()),
+        }
+    } else {
+        Err("client_stopped".to_string())
+    }
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn execute_prepare(
+    client_resource: ResourceArc<ClientResource>,
+    statement_resource: ResourceArc<PreparedStatementResource>,
+    // the parameters for the prepared statement. is list(list(term())) in Erlnag
+    params: Term,
+) -> Result<Vec<Vec<String>>, String> {
+    let mut client_guard = client_resource.0.lock().unwrap();
+    let mut statement_guard = statement_resource.0.lock().unwrap();
+
+    if let (Some(client), Some(statement)) = (&mut *client_guard, &mut *statement_guard) {
+        let binding = match util::params_to_record_batch(statement, params) {
+            Ok(rb) => rb,
+            Err(e) => return Err(format!("invalid_params: {:?}", e)),
+        };
+
+        match RT.block_on(client.execute_prepared(statement, binding)) {
+            Ok(result) => Ok(util::record_batch_to_term(&result[..])),
+            Err(e) => Err(e.to_string()),
+        }
+    } else {
+        Err("client_or_statement_stopped".to_string())
+    }
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn close_prepared(
+    client_resource: ResourceArc<ClientResource>,
+    statement_resource: ResourceArc<PreparedStatementResource>,
+) -> Result<rustler::Atom, String> {
+    let mut client_guard = client_resource.0.lock().unwrap();
+    let mut statement_guard = statement_resource.0.lock().unwrap();
+
+    if let (Some(client), Some(statement)) = (client_guard.take(), statement_guard.take()) {
+        match RT.block_on(client.close_prepared(statement)) {
+            Ok(_) => Ok(ok()),
+            Err(e) => Err(e.to_string()),
+        }
+    } else {
+        Err("client_or_statement_stopped".to_string())
+    }
+}
+
+#[rustler::nif]
+fn stop(resource: ResourceArc<ClientResource>) -> rustler::Atom {
+    let mut client_guard = resource.0.lock().unwrap();
     if let Some(client) = client_guard.take() {
         RT.block_on(client.stop());
     }

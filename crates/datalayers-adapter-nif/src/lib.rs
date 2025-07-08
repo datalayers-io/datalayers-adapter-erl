@@ -10,7 +10,7 @@ use crate::resource::ClientResource;
 use atoms::*;
 use client::{Client, ClientConfig};
 use lazy_static::lazy_static;
-use rustler::{Encoder, Env, Term, ResourceArc};
+use rustler::{Env, Reference, ResourceArc, Term};
 use tokio::runtime::Runtime;
 
 rustler::init!("libdatalayers", load = on_load);
@@ -26,35 +26,33 @@ pub fn on_load(env: Env, _load_info: Term) -> bool {
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn connect_nif(config: ClientConfig) -> Result<ResourceArc<ClientResource>, String> {
-    let client = match RT.block_on(Client::try_new(&config)) {
-        Ok(client) => client,
+    match RT.block_on(Client::try_new(&config)) {
+        Ok(client) => return Ok(ClientResource::new(client)),
         Err(e) => return Err(e.to_string()),
-    };
-
-    Ok(ClientResource::new(client))
+    }
 }
 
 #[rustler::nif]
-fn execute_nif<'a>(env: Env<'a>, resource: Term<'a>, sql: String) -> Term<'a> {
+fn execute_nif<'a>(env: Env<'a>, resource: Reference, sql: String) -> Result<Term<'a>, String> {
     let client_resource: rustler::ResourceArc<ClientResource> = match resource.decode() {
         Ok(r) => r,
-        Err(_) => return (error(), "invalid_client_resource").encode(env),
+        Err(_) => return Err("invalid_client_resource".to_string()),
     };
 
     let mut client_guard = client_resource.0.lock().unwrap();
 
     if let Some(client) = &mut *client_guard {
         match RT.block_on(client.execute(&sql)) {
-            Ok(result) => (ok(), util::to_term(&result[..], env)).encode(env),
-            Err(e) => (error(), e.to_string()).encode(env),
+            Ok(result) => Ok(util::record_batch_to_term(&result[..], env)),
+            Err(e) => Err(e.to_string()),
         }
     } else {
-        (error(), client_stopped()).encode(env)
+        Err("client_stopped".to_string())
     }
 }
 
 #[rustler::nif]
-fn stop_nif(resource: Term) -> rustler::Atom {
+fn stop_nif(resource: Reference) -> rustler::Atom {
     let client_resource: rustler::ResourceArc<ClientResource> = match resource.decode() {
         Ok(r) => r,
         Err(_) => return error(),

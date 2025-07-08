@@ -2,7 +2,7 @@ use arrow_array::RecordBatch;
 use arrow_cast::display::array_value_to_string;
 use rustler::{Encoder, Env, Term};
 
-pub fn to_term<'a>(batches: &[RecordBatch], env: Env<'a>) -> Term<'a> {
+pub fn record_batch_to_term<'a>(batches: &[RecordBatch], env: Env<'a>) -> Term<'a> {
     let mut result: Vec<Vec<String>> = Vec::new();
     for batch in batches {
         for row_index in 0..batch.num_rows() {

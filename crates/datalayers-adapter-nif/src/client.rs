@@ -2,10 +2,7 @@ use std::{str::FromStr, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use arrow_array::RecordBatch;
-use arrow_flight::{
-    Ticket,
-    sql::client::FlightSqlServiceClient,
-};
+use arrow_flight::{Ticket, sql::client::FlightSqlServiceClient};
 use futures::TryStreamExt;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 // use tonic::transport::channel::Channel;
@@ -33,7 +30,11 @@ pub struct Client {
 
 impl Client {
     pub async fn try_new(config: &ClientConfig) -> Result<Self> {
-        let protocol = if config.tls_cert.is_some() { "https" } else { "http" };
+        let protocol = if config.tls_cert.is_some() {
+            "https"
+        } else {
+            "http"
+        };
         let uri = format!("{}://{}:{}", protocol, config.host, config.port);
         let mut endpoint = Endpoint::from_str(&uri)
             .context(format!("Failed to create an endpoint with uri {}", uri))?

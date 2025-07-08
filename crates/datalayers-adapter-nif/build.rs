@@ -20,9 +20,9 @@ fn main() {
     // We use target OS to determine if extension is `.so`, `.dll`, or `.dylib`
     // FIXME: the target file name setting here not work
     let file_name = match env::var("CARGO_CFG_TARGET_OS").unwrap().as_str() {
-        "windows" => "datalayers.dll",
-        "macos" | "ios" => "libdatalayers.dylib",
-        _ => "libdatalayers.so",
+        "windows" => "datalayers_nif.dll",
+        "macos" | "ios" => "libdatalayers_nif.dylib",
+        _ => "libdatalayers_nif.so",
     };
 
     let mut libpath = workspace_dir.join("target");

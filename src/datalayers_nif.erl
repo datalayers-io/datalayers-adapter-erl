@@ -6,12 +6,12 @@
     stop/1
 ]).
 
--export([load/0]).
--on_load(load/0).
+-export([init/0]).
+-on_load(init/0).
 
-load() ->
+init() ->
     NifName = "libdatalayers_nif",
-    {ok, Niflib} = filename:join(priv_dir(), NifName),
+    Niflib = filename:join(priv_dir(), NifName),
     case erlang:load_nif(Niflib, none) of
         ok ->
             ok;
@@ -19,8 +19,7 @@ load() ->
             Res
     end.
 
-
-%% ========================================
+%% =================================================================================================
 %% NIFs
 
 connect(_Opts) ->
@@ -32,8 +31,7 @@ execute(_Client, _Sql) ->
 stop(_Client) ->
     not_loaded(?LINE).
 
-
-%% ========================================
+%% =================================================================================================
 %% Helpers
 
 not_loaded(Line) ->

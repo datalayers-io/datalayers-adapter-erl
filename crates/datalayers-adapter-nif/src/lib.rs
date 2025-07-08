@@ -13,7 +13,7 @@ use lazy_static::lazy_static;
 use rustler::{Env, Reference, ResourceArc, Term};
 use tokio::runtime::Runtime;
 
-rustler::init!("libdatalayers", load = on_load);
+rustler::init!("datalayers_nif", load = on_load);
 
 lazy_static! {
     static ref RT: Runtime = Runtime::new().unwrap();
@@ -25,15 +25,15 @@ pub fn on_load(env: Env, _load_info: Term) -> bool {
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn connect_nif(config: ClientConfig) -> Result<ResourceArc<ClientResource>, String> {
+fn connect(config: ClientConfig) -> Result<ResourceArc<ClientResource>, String> {
     match RT.block_on(Client::try_new(&config)) {
         Ok(client) => return Ok(ClientResource::new(client)),
         Err(e) => return Err(e.to_string()),
     }
 }
 
-#[rustler::nif]
-fn execute_nif<'a>(env: Env<'a>, resource: Reference, sql: String) -> Result<Term<'a>, String> {
+#[rustler::nif(schedule = "DirtyIo")]
+fn execute<'a>(env: Env<'a>, resource: Reference, sql: String) -> Result<Term<'a>, String> {
     let client_resource: rustler::ResourceArc<ClientResource> = match resource.decode() {
         Ok(r) => r,
         Err(_) => return Err("invalid_client_resource".to_string()),
@@ -52,7 +52,7 @@ fn execute_nif<'a>(env: Env<'a>, resource: Reference, sql: String) -> Result<Ter
 }
 
 #[rustler::nif]
-fn stop_nif(resource: Reference) -> rustler::Atom {
+fn stop(resource: Reference) -> rustler::Atom {
     let client_resource: rustler::ResourceArc<ClientResource> = match resource.decode() {
         Ok(r) => r,
         Err(_) => return error(),

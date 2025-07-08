@@ -5,7 +5,7 @@ edition = "2024"
 build = "build.rs"
 
 [lib]
-name = "datalayers"
+name = "datalayers_nif"
 crate-type = ["cdylib"]
 
 [dependencies]

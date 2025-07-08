@@ -35,6 +35,8 @@ stop_test_() ->
                 password => Password
             }),
             ok = libdatalayers:stop(Client),
-            {error, client_stopped} = libdatalayers:execute(Client, <<"CREATE DATABASE eunit_test">>)
+            {error, client_stopped} = libdatalayers:execute(
+                Client, <<"CREATE DATABASE eunit_test">>
+            )
         end
     }.

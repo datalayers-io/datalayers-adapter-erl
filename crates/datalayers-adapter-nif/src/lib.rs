@@ -4,6 +4,7 @@ extern crate rustler;
 mod atoms;
 mod client;
 mod resource;
+mod types;
 mod util;
 
 use crate::resource::{ClientResource, PreparedStatementResource};

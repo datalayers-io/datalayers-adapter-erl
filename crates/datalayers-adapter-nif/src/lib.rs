@@ -115,7 +115,7 @@ fn close_prepared(
 
     if let (Some(client), Some(statement)) = (client_guard.take(), statement_guard.take()) {
         match RT.block_on(client.close_prepared(statement)) {
-            Ok(_) => Ok(ok()),
+            Ok(_) => Ok(prepare_closed()),
             Err(e) => Err(e.to_string()),
         }
     } else {

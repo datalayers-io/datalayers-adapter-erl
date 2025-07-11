@@ -32,7 +32,7 @@ prepare(Client, Sql) ->
 execute_prepare(Client, Statement, Params) ->
     datalayers_nif:execute_prepare(Client, Statement, Params).
 
--spec close_prepared(client(), prepared_statement()) -> ok | {error, reason()}.
+-spec close_prepared(client(), prepared_statement()) -> {ok, prepare_closed} | {error, reason()}.
 close_prepared(Client, Statement) ->
     datalayers_nif:close_prepared(Client, Statement).
 

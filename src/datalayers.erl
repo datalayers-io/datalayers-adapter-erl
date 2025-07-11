@@ -18,7 +18,7 @@
 
 -spec connect(Opts :: opts()) -> {ok, client()} | {error, reason()}.
 connect(Opts) ->
-    datalayers_nif:connect(NOpts).
+    datalayers_nif:connect(Opts).
 
 -spec execute(client(), sql()) -> {ok, result()} | {error, reason()}.
 execute(Client, Sql) ->

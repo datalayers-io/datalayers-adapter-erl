@@ -3,13 +3,15 @@ extern crate rustler;
 
 mod atoms;
 mod client;
+mod client_opts;
 mod resource;
 mod types;
 mod util;
 
 use crate::resource::{ClientResource, PreparedStatementResource};
 use atoms::*;
-use client::{Client, ClientConfig};
+use client::Client;
+use client_opts::ClientOpts;
 use lazy_static::lazy_static;
 use rustler::{Env, Reference, ResourceArc, Term};
 use tokio::runtime::Runtime;
@@ -27,8 +29,8 @@ pub fn on_load(env: Env, _load_info: Term) -> bool {
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn connect(config: ClientConfig) -> Result<ResourceArc<ClientResource>, String> {
-    match RT.block_on(Client::try_new(&config)) {
+fn connect(opts: ClientOpts) -> Result<ResourceArc<ClientResource>, String> {
+    match RT.block_on(Client::try_new(&opts)) {
         Ok(client) => Ok(ClientResource::new(client)),
         Err(e) => Err(e.to_string()),
     }

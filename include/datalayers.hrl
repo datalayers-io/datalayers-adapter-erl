@@ -1,9 +1,9 @@
 -type opts() :: #{
-    host => binary(),
-    port => integer(),
-    username => binary(),
-    password => binary(),
-    tls_cert := binary() | undefined
+    host := binary(),
+    port := integer(),
+    username := binary(),
+    password := binary(),
+    tls_cert := binary()
 }.
 -type client() :: reference().
 -type sql() :: binary().

@@ -29,8 +29,8 @@ pub fn on_load(env: Env, _load_info: Term) -> bool {
 #[rustler::nif(schedule = "DirtyIo")]
 fn connect(config: ClientConfig) -> Result<ResourceArc<ClientResource>, String> {
     match RT.block_on(Client::try_new(&config)) {
-        Ok(client) => return Ok(ClientResource::new(client)),
-        Err(e) => return Err(e.to_string()),
+        Ok(client) => Ok(ClientResource::new(client)),
+        Err(e) => Err(e.to_string()),
     }
 }
 

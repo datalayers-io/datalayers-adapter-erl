@@ -6,7 +6,6 @@ use tonic::transport::Channel;
 use crate::client::Client;
 
 /// A resource that holds a client reference for executing SQL queries.
-
 pub struct ClientResource(pub Mutex<Option<Client>>);
 
 impl rustler::Resource for ClientResource {}
@@ -18,7 +17,6 @@ impl ClientResource {
 }
 
 /// A resource that holds a prepared statement for executing SQL queries.
-
 pub struct PreparedStatementResource(pub Mutex<Option<PreparedStatement<Channel>>>);
 
 impl rustler::Resource for PreparedStatementResource {}

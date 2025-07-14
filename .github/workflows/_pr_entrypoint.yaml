@@ -49,6 +49,10 @@ jobs:
         run: |
           cargo fmt --check
 
+      - name: Check Erlang format
+        run: |
+          rebar3 fmt -c --verbose
+
       - name: Check TOML format
         run: |
           curl -fsSL https://github.com/tamasfe/taplo/releases/latest/download/taplo-linux-x86_64.gz \

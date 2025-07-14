@@ -1,7 +1,7 @@
 %% -*- mode: erlang -*-
 
 {application, datalayers, [
-    {description, "A Datalayers database erlang OTP library"},
+    {description, "Datalayers Client with RustNif"},
     {vsn, "0.1.0"},
     {registered, []},
     {applications, [

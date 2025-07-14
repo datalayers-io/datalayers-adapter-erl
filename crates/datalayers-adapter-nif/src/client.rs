@@ -19,14 +19,14 @@ impl Client {
     pub async fn try_new(opts: &ClientOpts) -> Result<Self> {
         let uri = opts.format_uri();
         let mut endpoint = Endpoint::from_str(&uri)
-            .context(format!("Failed to create an endpoint with uri {}", uri))?
+            .context(format!("Failed to create an endpoint with uri {uri}"))?
             .connect_timeout(Duration::from_secs(5))
             .keep_alive_while_idle(true);
 
         // Configures TLS if a certificate is provided.
         if let Some(tls_cert) = &opts.tls_cert {
             let cert = std::fs::read_to_string(tls_cert)
-                .context(format!("Failed to read the TLS cert file {}", tls_cert))?;
+                .context(format!("Failed to read the TLS cert file {tls_cert}"))?;
             let cert = Certificate::from_pem(cert);
             let tls_config = ClientTlsConfig::new()
                 .domain_name(opts.host.as_deref().unwrap_or_default())
@@ -39,7 +39,7 @@ impl Client {
         let channel = endpoint
             .connect()
             .await
-            .context(format!("Failed to connect to server with uri {}", uri))?;
+            .context(format!("Failed to connect to server with uri {uri}"))?;
         let mut flight_sql_client = FlightSqlServiceClient::new(channel);
 
         // Performs authorization with the Datalayers server.
@@ -50,7 +50,7 @@ impl Client {
             )
             .await
             .map_err(|e| {
-                eprintln!("{}", e);
+                eprintln!("{e}");
                 e
             })?;
 
@@ -65,7 +65,7 @@ impl Client {
             .execute(sql.to_string(), None)
             .await
             .map_err(|e| {
-                eprintln!("{}", e);
+                eprintln!("{e}");
                 e
             })?;
         let ticket = flight_info
@@ -85,7 +85,7 @@ impl Client {
             .prepare(sql.to_string(), None)
             .await
             .map_err(|e| {
-                eprintln!("{}", e);
+                eprintln!("{e}");
                 e
             })?;
         Ok(prepared_stmt)
@@ -100,7 +100,7 @@ impl Client {
             .set_parameters(binding)
             .context("Failed to bind a record batch to the prepared statement")?;
         let flight_info = prepared_stmt.execute().await.map_err(|e| {
-            eprintln!("{}", e);
+            eprintln!("{e}");
             e
         })?;
         let ticket = flight_info
@@ -130,11 +130,11 @@ impl Client {
     async fn do_get(&mut self, ticket: Ticket) -> Result<Vec<RecordBatch>> {
         use futures::TryStreamExt;
         let stream = self.inner.do_get(ticket).await.map_err(|e| {
-            eprintln!("{}", e);
+            eprintln!("{e}");
             e
         })?;
         let batches = stream.try_collect::<Vec<_>>().await.map_err(|e| {
-            eprintln!("{}", e);
+            eprintln!("{e}");
             e
         })?;
         if batches.is_empty() {

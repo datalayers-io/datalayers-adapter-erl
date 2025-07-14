@@ -93,7 +93,7 @@ fn execute_prepare(
     if let (Some(client), Some(statement)) = (&mut *client_guard, &mut *statement_guard) {
         let binding = match util::params_to_record_batch(statement, params) {
             Ok(rb) => rb,
-            Err(e) => return Err(format!("invalid_params: {:?}", e)),
+            Err(e) => return Err(format!("invalid_params: {e:?}")),
         };
 
         match RT.block_on(client.execute_prepared(statement, binding)) {

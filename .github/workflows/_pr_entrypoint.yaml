@@ -102,6 +102,12 @@ jobs:
       with:
         ref: ${{ github.event.inputs.ref }}
 
+    - name: Setup Erlang
+      uses: erlef/setup-beam@v1
+      with:
+        otp-version: '27.2.3'
+        rebar3-version: '3.24.0'
+
     - name: Start Datalayers Container
       run: |
         docker compose -f .ci/docker-compose-file/docker-compose-datalayers.yaml up -d

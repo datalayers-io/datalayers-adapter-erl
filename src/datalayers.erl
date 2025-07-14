@@ -28,7 +28,8 @@ execute(Client, Sql) ->
 prepare(Client, Sql) ->
     datalayers_nif:prepare(Client, Sql).
 
--spec execute_prepare(client(), prepared_statement(), params()) -> {ok, result()} | {error, reason()}.
+-spec execute_prepare(client(), prepared_statement(), params()) ->
+    {ok, result()} | {error, reason()}.
 execute_prepare(Client, Statement, Params) ->
     datalayers_nif:execute_prepare(Client, Statement, Params).
 

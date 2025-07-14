@@ -124,8 +124,8 @@ fn close_prepared(
 }
 
 #[rustler::nif]
-fn stop(resource: ResourceArc<ClientResource>) -> rustler::Atom {
-    let mut client_guard = resource.0.lock().unwrap();
+fn stop(client_resource: ResourceArc<ClientResource>) -> rustler::Atom {
+    let mut client_guard = client_resource.0.lock().unwrap();
     if let Some(client) = client_guard.take() {
         RT.block_on(client.stop());
     }

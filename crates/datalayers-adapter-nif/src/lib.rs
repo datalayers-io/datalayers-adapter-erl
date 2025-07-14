@@ -110,10 +110,10 @@ fn close_prepared(
     client_resource: ResourceArc<ClientResource>,
     statement_resource: ResourceArc<PreparedStatementResource>,
 ) -> Result<rustler::Atom, String> {
-    let mut client_guard = client_resource.0.lock().unwrap();
+    let client_guard = client_resource.0.lock().unwrap();
     let mut statement_guard = statement_resource.0.lock().unwrap();
 
-    if let (Some(client), Some(statement)) = (client_guard.take(), statement_guard.take()) {
+    if let (Some(client), Some(statement)) = (&*client_guard, statement_guard.take()) {
         match RT.block_on(client.close_prepared(statement)) {
             Ok(_) => Ok(prepare_closed()),
             Err(e) => Err(e.to_string()),

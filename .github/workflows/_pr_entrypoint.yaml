@@ -28,7 +28,8 @@ jobs:
   sanity_check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Checkout Code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.event.inputs.ref }}
 
@@ -54,6 +55,10 @@ jobs:
             | gzip -d - | install -m 755 /dev/stdin /usr/local/bin/taplo
           taplo format --check --diff
 
+      - name: Cargo Check
+        run: |
+          cargo check 2> /dev/null
+
       - name: Check Rust clippy
         run: |
           rustup toolchain list
@@ -65,10 +70,6 @@ jobs:
           arguments: --all-features
           command: check licenses sources bans
 
-      - name: Check Cargo build
-        run: |
-          cargo check 2> /dev/null
-
       - name: Check project bulid
         run: |
           rebar3 compile 2> /dev/null
@@ -78,9 +79,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout code
+    - name: Checkout Code
       uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      id: checkout
+      with:
+        ref: ${{ github.event.inputs.ref }}
 
     - name: Setup Erlang
       uses: erlef/setup-beam@v1
@@ -102,6 +104,11 @@ jobs:
     needs: sanity_check
 
     steps:
+    - name: Checkout Code
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        ref: ${{ github.event.inputs.ref }}
+
     - name: Cargo checks
       run: |
         cargo test

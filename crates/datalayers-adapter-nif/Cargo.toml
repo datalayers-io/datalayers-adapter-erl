@@ -10,7 +10,6 @@ name = "datalayers_nif"
 crate-type = ["cdylib"]
 
 [dependencies]
-rustler = "0.36.2"
 anyhow = "1.0"
 arrow-array = { version = "55.2", features = ["chrono-tz"] }
 arrow-cast = { version = "55.2", features = ["prettyprint"] }
@@ -21,7 +20,8 @@ arrow-flight = { version = "55.2", features = [
 arrow-schema = "55.2"
 chrono = "0.4"
 futures = "0.3"
+lazy_static = "1.5.0"
 regex = "1.10"
+rustler = "0.36.2"
 tokio = { version = "1.40", features = ["full"] }
 tonic = "0.12.3"
-lazy_static = "1.5.0"

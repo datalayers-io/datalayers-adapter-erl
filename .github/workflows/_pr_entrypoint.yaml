@@ -111,8 +111,11 @@ jobs:
     - name: Start Datalayers Container
       run: |
         docker compose -f .ci/docker-compose-file/docker-compose-datalayers.yaml up -d
-        export DATALAYERS_TCP_ADDR=$(docker container inspect datalayers_tcp -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+        echo "export DATALAYERS_TCP_ADDR=$(docker container inspect datalayers_tcp -f \
+          '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')" \
+          | tee -a env.sh
 
     - name: Run Common Test
       run: |
+        source env.sh
         make ct

@@ -72,7 +72,8 @@ jobs:
       - name: Check Cargo-deny
         uses: EmbarkStudios/cargo-deny-action@v1
         with:
-          arguments: --all-features -L error
+          log-level: error
+          arguments: --all-features
           command: check -s licenses sources bans
 
       - name: Check project bulid

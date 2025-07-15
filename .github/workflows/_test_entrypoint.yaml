@@ -1,4 +1,4 @@
-name: PR Entrypoint
+name: Test Entrypoint
 
 on:
   workflow_call:

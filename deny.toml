@@ -9,9 +9,10 @@
 
 [bans]
 # The graph highlighting used when creating dotgraphs for crates.
-highlight = "all"
+highlight = "simplest-path"
 # The lint level for when a crate version requirement is set to `*`.
 wildcards = "warn"
+allow-wildcard-paths = true
 # Lint level for when multiple versions of the same crate are detected.
 multiple-versions = "warn"
 # The default lint level for `default` features for workspace crates.
@@ -19,13 +20,13 @@ workspace-default-features = "allow"
 # The default lint level for `default` features for external crates.
 external-default-features = "allow"
 deny = [
-  # We are using rustls as the TLS implementation, so we shouldn't be linking
-  # in OpenSSL too.
-  #
-  # If you're hitting this, you might want to take a look at what new
-  # dependencies you have introduced and check if there's a way to depend on
-  # rustls instead of OpenSSL (tip: check the crate's feature flags).
-  { name = "openssl-sys" },
+    # We are using rustls as the TLS implementation, so we shouldn't be linking
+    # in OpenSSL too.
+    #
+    # If you're hitting this, you might want to take a look at what new
+    # dependencies you have introduced and check if there's a way to depend on
+    # rustls instead of OpenSSL (tip: check the crate's feature flags).
+    { name = "openssl-sys" },
 ]
 
 # ----------------------------------------------------------------
@@ -40,9 +41,6 @@ unknown-registry = "deny"
 # List of URLs for allowed crate registries. Defaults to the crates.io index
 # if not specified. If it is specified but empty, no registries are allowed.
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# List of URLs for allowed Git repositories
-allow-git = []
-
 
 # ----------------------------------------------------------------
 # ADVISORIES
@@ -55,10 +53,10 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 # The path where the advisory database is cloned/fetched into.
 db-path = "~/.cargo/advisory-db"
 yanked = "deny"
-
 ignore = [
-    { id = "RUSTSEC-2024-0436" },
+  { id = "RUSTSEC-2024-0436", reason= "paste 1.0.15, no longer maintained"},
 ]
+
 
 # ----------------------------------------------------------------
 # LICENSES
@@ -75,6 +73,8 @@ allow = [
   "MPL-2.0",
   "BSD-2-Clause",
   "Unicode-3.0",
+  "CDLA-Permissive-2.0",
+  "Zlib"
 ]
 
 # The confidence threshold for detecting a license from license text.
@@ -82,25 +82,6 @@ confidence-threshold = 0.95
 
 # Allow specific licenses on a per-crate basis, instead of globally.
 exceptions = [
-  { allow = [
-    "CC0-1.0",
-  ], name = "tiny-keccak", version = "*" },
-  { allow = [
-    "OpenSSL",
-  ], name = "ring", version = "*" },
-  { allow = [
-    "OpenSSL",
-  ], name = "aws-lc-sys", version = "*" },
-  { allow = [
-    "Unicode-DFS-2016",
-  ], name = "unicode-ident", version = "*" },
-]
-
-# Specify overrides for crates where licenses are hard to guess.
-[[licenses.clarify]]
-name = "ring"
-expression = "MIT AND ISC AND OpenSSL"
-license-files = [
-  # https://github.com/briansmith/ring/blob/95948b3977013aed16db92ae32e6b8384496a740/LICENSE
-  { path = "LICENSE", hash = 0xbd0eed23 },
+  { allow = ["CC0-1.0"], name = "tiny-keccak", version = "*" },
+  { allow = ["NCSA"], name = "libfuzzer-sys", version = "*" },
 ]

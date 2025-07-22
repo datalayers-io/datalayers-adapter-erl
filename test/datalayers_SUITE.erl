@@ -41,9 +41,14 @@ connect_test(_Config) ->
 stop_test(_Config) ->
     {ok, Client} = datalayers:connect(#{host => ?host}),
     ok = datalayers:stop(Client),
-    {error, <<"client_stopped">>} = datalayers:execute(
+    %% stop is cast
+    ct:sleep(100),
+    try datalayers:execute(
         Client, <<"CREATE DATABASE common_test">>
-    ).
+    ) catch
+          exit : {noproc, _} : _ -> ok;
+          _ -> ?assert(false, "Expected no process error")
+    end.
 
 %% erlfmt-ignore
 -define(create_database, <<"

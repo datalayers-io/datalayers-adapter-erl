@@ -18,7 +18,7 @@
 ]).
 
 -define(call(Client, Args), call(Client, ?FUNCTION_NAME, Args)).
--define(async(Client, Args, ResultCallback), async(Client, ?FUNCTION_NAME, Args, ResultCallback)).
+-define(async(Client, Args, ResultCallback), async(Client, with_out_async(?FUNCTION_NAME), Args, ResultCallback)).
 
 %% =================================================================================================
 %% APIs
@@ -84,3 +84,8 @@ call(Client, _Fun = Cmd, Args) ->
 async(Client, _Fun = Cmd, Args, ResultCallback) ->
     _ = erlang:send(Client, ?ASYNC_REQ(Cmd, Args, ResultCallback)),
     ok.
+
+with_out_async(Func) ->
+    Raw = atom_to_binary(Func, utf8),
+    <<"async_", Rest/binary>> = Raw,
+    _Cmd = binary_to_existing_atom(Rest, utf8).

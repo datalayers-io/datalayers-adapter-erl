@@ -33,6 +33,7 @@ end_per_testcase(_TestCase, _Config) ->
 
 connect_test(_Config) ->
     {ok, Client} = datalayers:connect(#{host => ?host}),
+    ?assert(is_pid(Client)),
     {ok, _} = datalayers:execute(Client, <<"CREATE DATABASE common_test">>),
     {ok, [[Version]]} = datalayers:execute(Client, <<"SELECT version()">>),
     ?assert(is_binary(Version)),
@@ -43,11 +44,13 @@ stop_test(_Config) ->
     ok = datalayers:stop(Client),
     %% stop is cast
     ct:sleep(100),
-    try datalayers:execute(
-        Client, <<"CREATE DATABASE common_test">>
-    ) catch
-          exit : {noproc, _} : _ -> ok;
-          _ -> ?assert(false, "Expected no process error")
+    try
+        datalayers:execute(
+            Client, <<"CREATE DATABASE common_test">>
+        )
+    catch
+        exit:{noproc, _}:_ -> ok;
+        _ -> ?assert(false, "Expected no process error")
     end.
 
 %% erlfmt-ignore

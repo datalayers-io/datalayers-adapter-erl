@@ -75,14 +75,12 @@ handle_call(?REQ(Func, Args), _From, State = ?client_ref(ClientRef)) ->
 
 %% handle_info({command})
 handle_info(?ASYNC_REQ(Func, Args, {CallbackFun, CallBackArgs}), State = ?client_ref(ClientRef)) ->
-    case apply_nif(Func, [ClientRef | Args]) of
-        ?is_ok = Ok ->
-            _ = erlang:apply(CallbackFun, [Ok | CallBackArgs]),
-            {noreply, State};
-        ?is_err = Err ->
-            _ = erlang:apply(CallbackFun, [Err | CallBackArgs]),
-            {noreply, State}
-    end.
+    Res = apply_nif(Func, [ClientRef | Args]),
+    _ = erlang:apply(CallbackFun, CallBackArgs ++ [Res]),
+    {noreply, State};
+handle_info(_, State) ->
+    %% Ignore other messages
+    {noreply, State}.
 
 handle_cast(stop, State = ?client_ref(ClientRef)) ->
     _ = datalayers_nif:stop(ClientRef),

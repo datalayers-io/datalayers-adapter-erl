@@ -74,8 +74,8 @@ handle_call(?REQ(Func, Args), _From, State = ?client_ref(ClientRef)) ->
     end.
 
 %% handle_info({command})
-handle_info(?ASYNC_REQ(Func, Args, {CallbackFun, CallBackArgs}), State) ->
-    case apply_nif(Func, Args) of
+handle_info(?ASYNC_REQ(Func, Args, {CallbackFun, CallBackArgs}), State = ?client_ref(ClientRef)) ->
+    case apply_nif(Func, [ClientRef | Args]) of
         ?is_ok = Ok ->
             _ = erlang:apply(CallbackFun, [Ok | CallBackArgs]),
             {noreply, State};

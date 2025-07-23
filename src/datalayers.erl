@@ -18,7 +18,9 @@
 ]).
 
 -define(call(Client, Args), call(Client, ?FUNCTION_NAME, Args)).
--define(async(Client, Args, ResultCallback), async(Client, with_out_async(?FUNCTION_NAME), Args, ResultCallback)).
+-define(async(Client, Args, ResultCallback),
+    async(Client, with_out_async(?FUNCTION_NAME), Args, ResultCallback)
+).
 
 %% =================================================================================================
 %% APIs

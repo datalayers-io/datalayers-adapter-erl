@@ -1,6 +1,7 @@
 use arrow_array::builder::{
     ArrayBuilder, BooleanBuilder, Float32Builder, Float64Builder, Int8Builder, Int16Builder,
-    Int32Builder, Int64Builder, StringBuilder, TimestampMillisecondBuilder, UInt8Builder,
+    Int32Builder, Int64Builder, StringBuilder, TimestampMicrosecondBuilder,
+    TimestampMillisecondBuilder, TimestampNanosecondBuilder, TimestampSecondBuilder, UInt8Builder,
     UInt16Builder, UInt32Builder, UInt64Builder,
 };
 use arrow_schema::{DataType, TimeUnit};
@@ -22,14 +23,27 @@ pub fn get_array_builder(data_type: &DataType) -> Box<dyn ArrayBuilder> {
         DataType::Float32 => Box::new(Float32Builder::new()),
         DataType::Float64 => Box::new(Float64Builder::new()),
 
+        DataType::Timestamp(TimeUnit::Second, Some(zone)) => {
+            Box::new(TimestampSecondBuilder::new().with_timezone(zone.clone()))
+        }
         DataType::Timestamp(TimeUnit::Millisecond, Some(zone)) => {
             Box::new(TimestampMillisecondBuilder::new().with_timezone(zone.clone()))
+        }
+        DataType::Timestamp(TimeUnit::Microsecond, Some(zone)) => {
+            Box::new(TimestampMicrosecondBuilder::new().with_timezone(zone.clone()))
+        }
+        DataType::Timestamp(TimeUnit::Nanosecond, Some(zone)) => {
+            Box::new(TimestampNanosecondBuilder::new().with_timezone(zone.clone()))
         }
 
         DataType::Boolean => Box::new(BooleanBuilder::new()),
 
         DataType::Utf8 => Box::new(StringBuilder::new()),
-        _ => unimplemented!(),
+
+        unimplemented => {
+            eprintln!("{unimplemented}");
+            unimplemented!()
+        }
     }
 }
 
@@ -71,6 +85,7 @@ pub fn append_value_to_builder(
                 .unwrap()
                 .append_value(val)
         }
+
         DataType::UInt8 => {
             let val = term.decode::<u8>().unwrap();
             builder
@@ -103,6 +118,7 @@ pub fn append_value_to_builder(
                 .unwrap()
                 .append_value(val)
         }
+
         DataType::Float32 => {
             let val = term.decode::<f32>().unwrap();
             builder
@@ -119,11 +135,12 @@ pub fn append_value_to_builder(
                 .unwrap()
                 .append_value(val)
         }
-        DataType::Boolean => {
-            let val = term.decode::<bool>().unwrap();
+
+        DataType::Timestamp(TimeUnit::Second, _) => {
+            let val = term.decode::<i64>().unwrap();
             builder
                 .as_any_mut()
-                .downcast_mut::<BooleanBuilder>()
+                .downcast_mut::<TimestampSecondBuilder>()
                 .unwrap()
                 .append_value(val)
         }
@@ -135,6 +152,32 @@ pub fn append_value_to_builder(
                 .unwrap()
                 .append_value(val)
         }
+        DataType::Timestamp(TimeUnit::Microsecond, _) => {
+            let val = term.decode::<i64>().unwrap();
+            builder
+                .as_any_mut()
+                .downcast_mut::<TimestampMicrosecondBuilder>()
+                .unwrap()
+                .append_value(val)
+        }
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => {
+            let val = term.decode::<i64>().unwrap();
+            builder
+                .as_any_mut()
+                .downcast_mut::<TimestampNanosecondBuilder>()
+                .unwrap()
+                .append_value(val)
+        }
+
+        DataType::Boolean => {
+            let val = term.decode::<bool>().unwrap();
+            builder
+                .as_any_mut()
+                .downcast_mut::<BooleanBuilder>()
+                .unwrap()
+                .append_value(val)
+        }
+
         DataType::Utf8 => {
             let val = term.decode::<String>().unwrap();
             builder
@@ -143,6 +186,10 @@ pub fn append_value_to_builder(
                 .unwrap()
                 .append_value(val)
         }
-        _ => unimplemented!(),
+
+        unimplemented => {
+            eprintln!("{unimplemented}");
+            unimplemented!()
+        }
     };
 }

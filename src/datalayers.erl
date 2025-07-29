@@ -17,6 +17,17 @@
     async_execute_prepare/4
 ]).
 
+-export_type([
+    opts/0,
+    client/0,
+    sql/0,
+    result/0,
+    reason/0,
+    args/0,
+    prepared_statement/0,
+    params/0
+]).
+
 -define(call(Client, Args), call(Client, ?FUNCTION_NAME, Args)).
 -define(async(Client, Args, ResultCallback),
     async(Client, with_out_async(?FUNCTION_NAME), Args, ResultCallback)
@@ -75,7 +86,6 @@ async_execute_prepare(Client, Statement, Params, ResultCallback) ->
 %% ================================================================================
 %% Helpers
 
--spec call(client(), command(), list()) -> {ok, term()} | {error, reason()}.
 call(Client, _Fun = Cmd, Args) ->
     case datalayers_sock:sync_command(Client, Cmd, Args) of
         {ok, _Result} = Ok -> Ok;

@@ -28,6 +28,22 @@
 
 -define(drop_table, <<"DROP TABLE IF EXISTS common_test.demo">>).
 
+%% erlfmt-ignore
+-define(create_nullable_table, <<"
+    CREATE TABLE common_test.demo_nullable (
+        ts TIMESTAMP NOT NULL,
+        sid INT32,
+        value REAL,
+        flag INT8,
+        note STRING NULL,
+        timestamp key(ts)
+    )
+    PARTITION BY HASH(sid) PARTITIONS 8
+    ENGINE=TimeSeries;
+">>).
+
+-define(drop_nullable_table, <<"DROP TABLE IF EXISTS common_test.demo_nullable">>).
+
 suite() -> [].
 
 all() ->
@@ -36,7 +52,8 @@ all() ->
         stop_test,
         prepare_test,
         invalid_ref_test,
-        prepare_invalid_params_test
+        prepare_invalid_params_test,
+        prepare_with_null_test
     ].
 
 groups() -> [].
@@ -46,6 +63,7 @@ init_per_suite(Config) ->
     {ok, Client} = datalayers:connect(#{host => ?host}),
     {ok, _} = datalayers:execute(Client, ?create_database),
     {ok, _} = datalayers:execute(Client, ?create_table),
+    {ok, _} = datalayers:execute(Client, ?create_nullable_table),
     {ok, [[?datalayers_version]]} = datalayers:execute(Client, <<"SELECT version()">>),
     ok = datalayers:stop(Client),
     Config.
@@ -53,6 +71,7 @@ init_per_suite(Config) ->
 end_per_suite(_Config) ->
     {ok, Client} = datalayers:connect(#{host => ?host}),
     {ok, _} = datalayers:execute(Client, ?drop_table),
+    {ok, _} = datalayers:execute(Client, ?drop_nullable_table),
     {ok, _} = datalayers:execute(Client, ?drop_database),
     ok = datalayers:stop(Client).
 
@@ -144,6 +163,27 @@ prepare_invalid_params_test(_Config) ->
     %% Case 2: Too many parameters
     ParamsLong = [[erlang:system_time(millisecond), 1, 42.0, 1, <<"extra">>]],
     ?assertMatch({error, _}, datalayers:execute_prepare(Client, PreparedStatement, ParamsLong)),
+
+    {ok, _} = datalayers:close_prepared(Client, PreparedStatement),
+    ok = datalayers:stop(Client).
+
+prepare_with_null_test(_Config) ->
+    {ok, Client} = datalayers:connect(#{host => ?host}),
+    {ok, PreparedStatement} = datalayers:prepare(
+        Client,
+        <<"INSERT INTO common_test.demo_nullable (ts, sid, value, flag, note) VALUES (?, ?, ?, ?, ?);">>
+    ),
+
+    Timestamp = erlang:system_time(millisecond),
+    Params = [[Timestamp, 1, 42.0, null, null]],
+    {ok, _} = datalayers:execute_prepare(Client, PreparedStatement, Params),
+
+    {ok, [[_, _, _, <<>>, <<>>]]} = datalayers:execute(
+        Client,
+        iolist_to_binary(
+            io_lib:format("SELECT * FROM common_test.demo_nullable WHERE ts = ~p", [Timestamp])
+        )
+    ),
 
     {ok, _} = datalayers:close_prepared(Client, PreparedStatement),
     ok = datalayers:stop(Client).

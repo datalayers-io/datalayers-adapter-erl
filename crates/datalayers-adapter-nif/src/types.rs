@@ -1,3 +1,4 @@
+use crate::atoms;
 use arrow_array::builder::{
     ArrayBuilder, BooleanBuilder, Float32Builder, Float64Builder, Int8Builder, Int16Builder,
     Int32Builder, Int64Builder, StringBuilder, TimestampMicrosecondBuilder,
@@ -5,7 +6,7 @@ use arrow_array::builder::{
     UInt16Builder, UInt32Builder, UInt64Builder,
 };
 use arrow_schema::{DataType, TimeUnit};
-use rustler::{Error, Term};
+use rustler::{Decoder, Error, Term};
 
 macro_rules! define_type_handling_functions {
     (
@@ -36,22 +37,22 @@ macro_rules! define_type_handling_functions {
             match data_type {
                 $(
                     DataType::$dt => {
-                        let val = term.decode::<$rust_ty>()?;
+                        let val = decode_term_to_option::<$rust_ty>(term)?;
                         builder
                             .as_any_mut()
                             .downcast_mut::<$builder>()
                             .ok_or(Error::BadArg)?
-                            .append_value(val);
+                            .append_option(val);
                     }
                 )*
                 $(
                     DataType::Timestamp(TimeUnit::$unit, _) => {
-                        let val = term.decode::<i64>()?;
+                        let val = decode_term_to_option::<i64>(term)?;
                         builder
                             .as_any_mut()
                             .downcast_mut::<$ts_builder>()
                             .ok_or(Error::BadArg)?
-                            .append_value(val);
+                            .append_option(val);
                     }
                 )*
                 unimplemented => {
@@ -87,4 +88,19 @@ define_type_handling_functions! {
         (Microsecond, TimestampMicrosecondBuilder),
         (Nanosecond, TimestampNanosecondBuilder),
     ]
+}
+
+fn is_null(term: &Term) -> bool {
+    term.is_atom() && term.eq(&atoms::null().to_term(term.get_env()))
+}
+
+fn decode_term_to_option<'a, T>(term: Term<'a>) -> Result<Option<T>, Error>
+where
+    T: Decoder<'a>,
+{
+    if is_null(&term) {
+        Ok(None)
+    } else {
+        term.decode::<T>().map(Some)
+    }
 }

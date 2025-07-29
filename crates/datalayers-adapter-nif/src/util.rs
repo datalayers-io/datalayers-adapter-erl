@@ -48,7 +48,7 @@ pub fn params_to_record_batch(
 
     for (i, field) in schema.fields().iter().enumerate() {
         let data_type = field.data_type();
-        let mut builder = get_array_builder(data_type);
+        let mut builder = get_array_builder(data_type)?;
 
         for row in &matrix {
             if row.len() != num_cols {

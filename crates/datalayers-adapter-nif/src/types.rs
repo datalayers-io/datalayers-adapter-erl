@@ -23,18 +23,18 @@ pub fn get_array_builder(data_type: &DataType) -> Result<Box<dyn ArrayBuilder>, 
         DataType::Float32 => Ok(Box::new(Float32Builder::new())),
         DataType::Float64 => Ok(Box::new(Float64Builder::new())),
 
-        DataType::Timestamp(TimeUnit::Second, Some(zone)) => {
-            Ok(Box::new(TimestampSecondBuilder::new().with_timezone(zone.clone())))
-        }
-        DataType::Timestamp(TimeUnit::Millisecond, Some(zone)) => {
-            Ok(Box::new(TimestampMillisecondBuilder::new().with_timezone(zone.clone())))
-        }
-        DataType::Timestamp(TimeUnit::Microsecond, Some(zone)) => {
-            Ok(Box::new(TimestampMicrosecondBuilder::new().with_timezone(zone.clone())))
-        }
-        DataType::Timestamp(TimeUnit::Nanosecond, Some(zone)) => {
-            Ok(Box::new(TimestampNanosecondBuilder::new().with_timezone(zone.clone())))
-        }
+        DataType::Timestamp(TimeUnit::Second, Some(zone)) => Ok(Box::new(
+            TimestampSecondBuilder::new().with_timezone(zone.clone()),
+        )),
+        DataType::Timestamp(TimeUnit::Millisecond, Some(zone)) => Ok(Box::new(
+            TimestampMillisecondBuilder::new().with_timezone(zone.clone()),
+        )),
+        DataType::Timestamp(TimeUnit::Microsecond, Some(zone)) => Ok(Box::new(
+            TimestampMicrosecondBuilder::new().with_timezone(zone.clone()),
+        )),
+        DataType::Timestamp(TimeUnit::Nanosecond, Some(zone)) => Ok(Box::new(
+            TimestampNanosecondBuilder::new().with_timezone(zone.clone()),
+        )),
 
         DataType::Boolean => Ok(Box::new(BooleanBuilder::new())),
 
@@ -189,7 +189,7 @@ pub fn append_value_to_builder(
         unimplemented => {
             return Err(Error::Term(Box::new(format!(
                 "unsupported type: {unimplemented}"
-            ))))
+            ))));
         }
     };
     Ok(())

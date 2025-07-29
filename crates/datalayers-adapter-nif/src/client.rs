@@ -1,11 +1,11 @@
 use std::{str::FromStr, time::Duration};
 
 use crate::client_opts::ClientOpts;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use arrow_array::RecordBatch;
 use arrow_flight::{
-    sql::client::{FlightSqlServiceClient, PreparedStatement},
     Ticket,
+    sql::client::{FlightSqlServiceClient, PreparedStatement},
 };
 
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};

@@ -29,7 +29,7 @@ impl Client {
                 .context(format!("Failed to read the TLS cert file {tls_cert}"))?;
             let cert = Certificate::from_pem(cert);
             let tls_config = ClientTlsConfig::new()
-                .domain_name(opts.host.as_deref().unwrap_or_default())
+                .domain_name(opts.host.clone().unwrap_or_default())
                 .ca_certificate(cert);
             endpoint = endpoint
                 .tls_config(tls_config)
@@ -45,8 +45,8 @@ impl Client {
         // Performs authorization with the Datalayers server.
         let _ = flight_sql_client
             .handshake(
-                opts.username.as_deref().unwrap_or_default(),
-                opts.password.as_deref().unwrap_or_default(),
+                &opts.username.clone().unwrap_or_default(),
+                &opts.password.clone().unwrap_or_default(),
             )
             .await
             .map_err(|e| {

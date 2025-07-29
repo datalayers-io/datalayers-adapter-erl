@@ -58,8 +58,8 @@ impl ClientOpts {
         format!(
             "{}://{}:{}",
             self.protocol(),
-            self.host.as_deref().unwrap_or_default(),
-            self.port.unwrap_or_default()
+            self.host.clone().unwrap_or_default(),
+            self.port.unwrap_or(8360)
         )
     }
 }

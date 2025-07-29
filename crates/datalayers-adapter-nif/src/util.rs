@@ -13,7 +13,7 @@ pub fn record_batch_to_term(batches: &[RecordBatch]) -> Vec<Vec<String>> {
             let mut row: Vec<String> = Vec::new();
             for col in batch.columns() {
                 // TODO: better type mapping
-                row.push(array_value_to_string(col, row_index).unwrap());
+                row.push(array_value_to_string(col, row_index).unwrap_or_default());
             }
             result.push(row);
         }
@@ -35,14 +35,26 @@ pub fn params_to_record_batch(
         .map(|row_term| row_term.decode::<Vec<Term>>())
         .collect::<NifResult<Vec<Vec<Term>>>>()?;
 
-    let mut array_columns: Vec<ArrayRef> = Vec::with_capacity(matrix[0].len());
+    if matrix.is_empty() {
+        return Err(Error::BadArg);
+    }
+
+    let num_cols = matrix[0].len();
+    if num_cols != schema.fields().len() {
+        return Err(Error::BadArg);
+    }
+
+    let mut array_columns: Vec<ArrayRef> = Vec::with_capacity(num_cols);
 
     for (i, field) in schema.fields().iter().enumerate() {
         let data_type = field.data_type();
         let mut builder = get_array_builder(data_type);
 
         for row in &matrix {
-            append_value_to_builder(&mut builder, row[i], data_type);
+            if row.len() != num_cols {
+                return Err(Error::BadArg);
+            }
+            append_value_to_builder(&mut builder, row[i], data_type)?;
         }
         array_columns.push(builder.finish());
     }

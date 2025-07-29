@@ -5,7 +5,7 @@ use arrow_array::builder::{
     UInt16Builder, UInt32Builder, UInt64Builder,
 };
 use arrow_schema::{DataType, TimeUnit};
-use rustler::Term;
+use rustler::{Error, Term};
 
 pub fn get_array_builder(data_type: &DataType) -> Box<dyn ArrayBuilder> {
     // https://docs.datalayers.cn/datalayers/latest/sql-reference/data-type.html
@@ -51,139 +51,139 @@ pub fn append_value_to_builder(
     builder: &mut Box<dyn ArrayBuilder>,
     term: Term,
     data_type: &DataType,
-) {
+) -> Result<(), Error> {
     match data_type {
         DataType::Int8 => {
-            let val = term.decode::<i8>().unwrap();
+            let val = term.decode::<i8>()?;
             builder
                 .as_any_mut()
                 .downcast_mut::<Int8Builder>()
-                .unwrap()
+                .ok_or(Error::BadArg)?
                 .append_value(val)
         }
         DataType::Int16 => {
-            let val = term.decode::<i16>().unwrap();
+            let val = term.decode::<i16>()?;
             builder
                 .as_any_mut()
                 .downcast_mut::<Int16Builder>()
-                .unwrap()
+                .ok_or(Error::BadArg)?
                 .append_value(val)
         }
         DataType::Int32 => {
-            let val = term.decode::<i32>().unwrap();
+            let val = term.decode::<i32>()?;
             builder
                 .as_any_mut()
                 .downcast_mut::<Int32Builder>()
-                .unwrap()
+                .ok_or(Error::BadArg)?
                 .append_value(val)
         }
         DataType::Int64 => {
-            let val = term.decode::<i64>().unwrap();
+            let val = term.decode::<i64>()?;
             builder
                 .as_any_mut()
                 .downcast_mut::<Int64Builder>()
-                .unwrap()
+                .ok_or(Error::BadArg)?
                 .append_value(val)
         }
 
         DataType::UInt8 => {
-            let val = term.decode::<u8>().unwrap();
+            let val = term.decode::<u8>()?;
             builder
                 .as_any_mut()
                 .downcast_mut::<UInt8Builder>()
-                .unwrap()
+                .ok_or(Error::BadArg)?
                 .append_value(val)
         }
         DataType::UInt16 => {
-            let val = term.decode::<u16>().unwrap();
+            let val = term.decode::<u16>()?;
             builder
                 .as_any_mut()
                 .downcast_mut::<UInt16Builder>()
-                .unwrap()
+                .ok_or(Error::BadArg)?
                 .append_value(val)
         }
         DataType::UInt32 => {
-            let val = term.decode::<u32>().unwrap();
+            let val = term.decode::<u32>()?;
             builder
                 .as_any_mut()
                 .downcast_mut::<UInt32Builder>()
-                .unwrap()
+                .ok_or(Error::BadArg)?
                 .append_value(val)
         }
         DataType::UInt64 => {
-            let val = term.decode::<u64>().unwrap();
+            let val = term.decode::<u64>()?;
             builder
                 .as_any_mut()
                 .downcast_mut::<UInt64Builder>()
-                .unwrap()
+                .ok_or(Error::BadArg)?
                 .append_value(val)
         }
 
         DataType::Float32 => {
-            let val = term.decode::<f32>().unwrap();
+            let val = term.decode::<f32>()?;
             builder
                 .as_any_mut()
                 .downcast_mut::<Float32Builder>()
-                .unwrap()
+                .ok_or(Error::BadArg)?
                 .append_value(val)
         }
         DataType::Float64 => {
-            let val = term.decode::<f64>().unwrap();
+            let val = term.decode::<f64>()?;
             builder
                 .as_any_mut()
                 .downcast_mut::<Float64Builder>()
-                .unwrap()
+                .ok_or(Error::BadArg)?
                 .append_value(val)
         }
 
         DataType::Timestamp(TimeUnit::Second, _) => {
-            let val = term.decode::<i64>().unwrap();
+            let val = term.decode::<i64>()?;
             builder
                 .as_any_mut()
                 .downcast_mut::<TimestampSecondBuilder>()
-                .unwrap()
+                .ok_or(Error::BadArg)?
                 .append_value(val)
         }
         DataType::Timestamp(TimeUnit::Millisecond, _) => {
-            let val = term.decode::<i64>().unwrap();
+            let val = term.decode::<i64>()?;
             builder
                 .as_any_mut()
                 .downcast_mut::<TimestampMillisecondBuilder>()
-                .unwrap()
+                .ok_or(Error::BadArg)?
                 .append_value(val)
         }
         DataType::Timestamp(TimeUnit::Microsecond, _) => {
-            let val = term.decode::<i64>().unwrap();
+            let val = term.decode::<i64>()?;
             builder
                 .as_any_mut()
                 .downcast_mut::<TimestampMicrosecondBuilder>()
-                .unwrap()
+                .ok_or(Error::BadArg)?
                 .append_value(val)
         }
         DataType::Timestamp(TimeUnit::Nanosecond, _) => {
-            let val = term.decode::<i64>().unwrap();
+            let val = term.decode::<i64>()?;
             builder
                 .as_any_mut()
                 .downcast_mut::<TimestampNanosecondBuilder>()
-                .unwrap()
+                .ok_or(Error::BadArg)?
                 .append_value(val)
         }
 
         DataType::Boolean => {
-            let val = term.decode::<bool>().unwrap();
+            let val = term.decode::<bool>()?;
             builder
                 .as_any_mut()
                 .downcast_mut::<BooleanBuilder>()
-                .unwrap()
+                .ok_or(Error::BadArg)?
                 .append_value(val)
         }
 
         DataType::Utf8 => {
-            let val = term.decode::<String>().unwrap();
+            let val = term.decode::<String>()?;
             builder
                 .as_any_mut()
                 .downcast_mut::<StringBuilder>()
-                .unwrap()
+                .ok_or(Error::BadArg)?
                 .append_value(val)
         }
 
@@ -192,4 +192,5 @@ pub fn append_value_to_builder(
             unimplemented!()
         }
     };
+    Ok(())
 }

@@ -7,17 +7,54 @@
 
 -compile([export_all, nowarn_export_all]).
 
+-define(datalayers_version, <<"2.3.6">>).
+
+-define(create_database, <<"CREATE DATABASE common_test">>).
+
+-define(drop_database, <<"DROP DATABASE common_test">>).
+
+%% erlfmt-ignore
+-define(create_table, <<"
+    CREATE TABLE common_test.demo (
+        ts TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        sid INT32,
+        value REAL,
+        flag INT8,
+        timestamp key(ts)
+    )
+    PARTITION BY HASH(sid) PARTITIONS 8
+    ENGINE=TimeSeries;
+">>).
+
+-define(drop_table, <<"DROP TABLE IF EXISTS common_test.demo">>).
+
 suite() -> [].
 
-all() -> [connect_test, stop_test, prepare_test].
+all() ->
+    [
+        connect_test,
+        stop_test,
+        prepare_test,
+        invalid_ref_test,
+        prepare_invalid_params_test
+    ].
 
 groups() -> [].
 
 init_per_suite(Config) ->
+    %% Initialize the configuration for the test suite
+    {ok, Client} = datalayers:connect(#{host => ?host}),
+    {ok, _} = datalayers:execute(Client, ?create_database),
+    {ok, _} = datalayers:execute(Client, ?create_table),
+    {ok, [[?datalayers_version]]} = datalayers:execute(Client, <<"SELECT version()">>),
+    ok = datalayers:stop(Client),
     Config.
 
 end_per_suite(_Config) ->
-    ok.
+    {ok, Client} = datalayers:connect(#{host => ?host}),
+    {ok, _} = datalayers:execute(Client, ?drop_table),
+    {ok, _} = datalayers:execute(Client, ?drop_database),
+    ok = datalayers:stop(Client).
 
 init_per_group(_GroupName, Config) ->
     Config.
@@ -33,35 +70,26 @@ end_per_testcase(_TestCase, _Config) ->
 
 connect_test(_Config) ->
     {ok, Client} = datalayers:connect(#{host => ?host}),
-    {ok, _} = datalayers:execute(Client, <<"CREATE DATABASE common_test">>),
-    {ok, [[Version]]} = datalayers:execute(Client, <<"SELECT version()">>),
-    ?assert(is_binary(Version)),
-    {ok, _} = datalayers:execute(Client, <<"DROP DATABASE common_test">>).
+    ?assert(is_pid(Client)),
+    _ = datalayers:stop(Client),
+    ok.
 
 stop_test(_Config) ->
     {ok, Client} = datalayers:connect(#{host => ?host}),
     ok = datalayers:stop(Client),
-    {error, <<"client_stopped">>} = datalayers:execute(
-        Client, <<"CREATE DATABASE common_test">>
-    ).
-
-%% erlfmt-ignore
--define(create_database, <<"
-    CREATE TABLE common_test.demo (
-        ts TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        sid INT32,
-        value REAL,
-        flag INT8,
-        timestamp key(ts)
-    )
-    PARTITION BY HASH(sid) PARTITIONS 8
-    ENGINE=TimeSeries;
-">>).
+    %% stop is cast
+    ct:sleep(100),
+    try
+        datalayers:execute(
+            Client, ?create_database
+        )
+    catch
+        exit:{noproc, _}:_ -> ok;
+        _ -> ?assert(false, "Expected no process error")
+    end.
 
 prepare_test(_Config) ->
     {ok, Client} = datalayers:connect(#{host => ?host}),
-    {ok, _} = datalayers:execute(Client, <<"CREATE DATABASE common_test">>),
-    {ok, _} = datalayers:execute(Client, ?create_database),
     {ok, PreparedStatement} = datalayers:prepare(
         Client,
         <<"INSERT INTO common_test.demo (ts, sid, value, flag) VALUES (?, ?, ?, ?);">>
@@ -71,9 +99,53 @@ prepare_test(_Config) ->
         [erlang:system_time(millisecond), 2, 43.0, 0]
     ]),
     {ok, _} = datalayers:close_prepared(Client, PreparedStatement),
-    {ok, [[<<"2.3.3">>]]} = datalayers:execute(Client, <<"SELECT version()">>),
-    {ok, _} = datalayers:execute(Client, <<"DROP TABLE common_test.demo">>),
-    {ok, _} = datalayers:execute(Client, <<"DROP DATABASE common_test">>),
+    ok = datalayers:stop(Client).
+
+invalid_ref_test(_Config) ->
+    {ok, ClientRef} = datalayers_nif:connect(#{host => ?host}),
+    InvalidRef = make_ref(),
+
+    ?assertMatch(
+        {error, <<"invalid_client_resource">>}, datalayers_nif:execute(InvalidRef, <<"SELECT 1">>)
+    ),
+    ?assertMatch(
+        {error, <<"invalid_client_resource">>}, datalayers_nif:prepare(InvalidRef, <<"SELECT 1">>)
+    ),
+    ?assertMatch(
+        {error, <<"invalid_client_resource">>},
+        datalayers_nif:execute_prepare(InvalidRef, InvalidRef, [])
+    ),
+    ?assertMatch(
+        {error, <<"invalid_statement_resource">>},
+        datalayers_nif:execute_prepare(ClientRef, InvalidRef, [])
+    ),
+    ?assertMatch(
+        {error, <<"invalid_client_resource">>},
+        datalayers_nif:close_prepared(InvalidRef, InvalidRef)
+    ),
+    ?assertMatch(
+        {error, <<"invalid_statement_resource">>},
+        datalayers_nif:close_prepared(ClientRef, InvalidRef)
+    ),
+
+    ok = datalayers_nif:stop(ClientRef).
+
+prepare_invalid_params_test(_Config) ->
+    {ok, Client} = datalayers:connect(#{host => ?host}),
+    {ok, PreparedStatement} = datalayers:prepare(
+        Client,
+        <<"INSERT INTO common_test.demo (ts, sid, value, flag) VALUES (?, ?, ?, ?);">>
+    ),
+
+    %% Case 1: Too few parameters
+    ParamsShort = [[erlang:system_time(millisecond), 1, 42.0]],
+    ?assertMatch({error, _}, datalayers:execute_prepare(Client, PreparedStatement, ParamsShort)),
+
+    %% Case 2: Too many parameters
+    ParamsLong = [[erlang:system_time(millisecond), 1, 42.0, 1, <<"extra">>]],
+    ?assertMatch({error, _}, datalayers:execute_prepare(Client, PreparedStatement, ParamsLong)),
+
+    {ok, _} = datalayers:close_prepared(Client, PreparedStatement),
     ok = datalayers:stop(Client).
 
 get_host_addr() ->

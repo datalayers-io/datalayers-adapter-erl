@@ -30,3 +30,4 @@ dialyzer:
 .PHONY: fmt
 fmt:
 	rebar3 fmt
+	cargo fmt --all -- --check

@@ -205,6 +205,15 @@ t_prepare_with_null_test(Config) ->
     {ok, _} = datalayers:close_prepared(Client, PreparedStatement),
     ok = datalayers:stop(Client).
 
+t_empty_batch(Config) ->
+    {ok, Client} = datalayers:connect(?conn_opts(Config)),
+    Timestamp = erlang:system_time(millisecond),
+    %% Empty table
+    ?assertEqual(
+        {ok, []}, do_execute(Client, ?select_all_from_table_by_ts(Config, Timestamp))
+    ),
+    datalayers:stop(Client).
+
 %% ================================================================================
 %% Helpers
 %% ================================================================================

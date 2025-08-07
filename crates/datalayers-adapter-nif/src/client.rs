@@ -29,7 +29,7 @@ impl Client {
                 .context(format!("Failed to read the TLS cert file {tls_cert}"))?;
             let cert = Certificate::from_pem(cert);
             let tls_config = ClientTlsConfig::new()
-                .domain_name(opts.host.as_deref().unwrap_or_default())
+                .domain_name(opts.host.clone().unwrap_or_default())
                 .ca_certificate(cert);
             endpoint = endpoint
                 .tls_config(tls_config)
@@ -45,14 +45,10 @@ impl Client {
         // Performs authorization with the Datalayers server.
         let _ = flight_sql_client
             .handshake(
-                opts.username.as_deref().unwrap_or_default(),
-                opts.password.as_deref().unwrap_or_default(),
+                &opts.username.clone().unwrap_or_default(),
+                &opts.password.clone().unwrap_or_default(),
             )
-            .await
-            .map_err(|e| {
-                eprintln!("{e}");
-                e
-            })?;
+            .await?;
 
         Ok(Self {
             inner: flight_sql_client,
@@ -60,14 +56,7 @@ impl Client {
     }
 
     pub async fn execute(&mut self, sql: &str) -> Result<Vec<RecordBatch>> {
-        let flight_info = self
-            .inner
-            .execute(sql.to_string(), None)
-            .await
-            .map_err(|e| {
-                eprintln!("{e}");
-                e
-            })?;
+        let flight_info = self.inner.execute(sql.to_string(), None).await?;
         let ticket = flight_info
             .endpoint
             .first()
@@ -80,14 +69,7 @@ impl Client {
     }
 
     pub async fn prepare(&mut self, sql: &str) -> Result<PreparedStatement<Channel>> {
-        let prepared_stmt = self
-            .inner
-            .prepare(sql.to_string(), None)
-            .await
-            .map_err(|e| {
-                eprintln!("{e}");
-                e
-            })?;
+        let prepared_stmt = self.inner.prepare(sql.to_string(), None).await?;
         Ok(prepared_stmt)
     }
 
@@ -99,10 +81,7 @@ impl Client {
         prepared_stmt
             .set_parameters(binding)
             .context("Failed to bind a record batch to the prepared statement")?;
-        let flight_info = prepared_stmt.execute().await.map_err(|e| {
-            eprintln!("{e}");
-            e
-        })?;
+        let flight_info = prepared_stmt.execute().await?;
         let ticket = flight_info
             .endpoint
             .first()
@@ -129,14 +108,8 @@ impl Client {
 
     async fn do_get(&mut self, ticket: Ticket) -> Result<Vec<RecordBatch>> {
         use futures::TryStreamExt;
-        let stream = self.inner.do_get(ticket).await.map_err(|e| {
-            eprintln!("{e}");
-            e
-        })?;
-        let batches = stream.try_collect::<Vec<_>>().await.map_err(|e| {
-            eprintln!("{e}");
-            e
-        })?;
+        let stream = self.inner.do_get(ticket).await?;
+        let batches = stream.try_collect::<Vec<_>>().await?;
         if batches.is_empty() {
             bail!("Unexpected empty batches");
         }

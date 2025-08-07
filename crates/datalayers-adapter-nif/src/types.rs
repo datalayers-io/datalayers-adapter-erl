@@ -1,148 +1,90 @@
 use arrow_array::builder::{
     ArrayBuilder, BooleanBuilder, Float32Builder, Float64Builder, Int8Builder, Int16Builder,
-    Int32Builder, Int64Builder, StringBuilder, TimestampMillisecondBuilder, UInt8Builder,
+    Int32Builder, Int64Builder, StringBuilder, TimestampMicrosecondBuilder,
+    TimestampMillisecondBuilder, TimestampNanosecondBuilder, TimestampSecondBuilder, UInt8Builder,
     UInt16Builder, UInt32Builder, UInt64Builder,
 };
 use arrow_schema::{DataType, TimeUnit};
-use rustler::Term;
+use rustler::{Error, Term};
 
-pub fn get_array_builder(data_type: &DataType) -> Box<dyn ArrayBuilder> {
-    // https://docs.datalayers.cn/datalayers/latest/sql-reference/data-type.html
-    match data_type {
-        DataType::Int8 => Box::new(Int8Builder::new()),
-        DataType::Int16 => Box::new(Int16Builder::new()),
-        DataType::Int32 => Box::new(Int32Builder::new()),
-        DataType::Int64 => Box::new(Int64Builder::new()),
-
-        DataType::UInt8 => Box::new(UInt8Builder::new()),
-        DataType::UInt16 => Box::new(UInt16Builder::new()),
-        DataType::UInt32 => Box::new(UInt32Builder::new()),
-        DataType::UInt64 => Box::new(UInt64Builder::new()),
-
-        DataType::Float32 => Box::new(Float32Builder::new()),
-        DataType::Float64 => Box::new(Float64Builder::new()),
-
-        DataType::Timestamp(TimeUnit::Millisecond, Some(zone)) => {
-            Box::new(TimestampMillisecondBuilder::new().with_timezone(zone.clone()))
+macro_rules! define_type_handling_functions {
+    (
+        standard_types: [ $( ($dt:ident, $builder:ident, $rust_ty:ty) ),* $(,)? ],
+        timestamp_types: [ $( ($unit:ident, $ts_builder:ident) ),* $(,)? ]
+    ) => {
+        pub fn get_array_builder(data_type: &DataType) -> Result<Box<dyn ArrayBuilder>, Error> {
+            match data_type {
+                $(
+                    DataType::$dt => Ok(Box::new($builder::new())),
+                )*
+                $(
+                    DataType::Timestamp(TimeUnit::$unit, Some(zone)) => Ok(Box::new(
+                        $ts_builder::new().with_timezone(zone.clone()),
+                    )),
+                )*
+                unimplemented => Err(Error::Term(Box::new(format!(
+                    "unsupported type: {unimplemented}"
+                )))),
+            }
         }
 
-        DataType::Boolean => Box::new(BooleanBuilder::new()),
-
-        DataType::Utf8 => Box::new(StringBuilder::new()),
-        _ => unimplemented!(),
-    }
+        pub fn append_value_to_builder(
+            builder: &mut Box<dyn ArrayBuilder>,
+            term: Term,
+            data_type: &DataType,
+        ) -> Result<(), Error> {
+            match data_type {
+                $(
+                    DataType::$dt => {
+                        let val = term.decode::<$rust_ty>()?;
+                        builder
+                            .as_any_mut()
+                            .downcast_mut::<$builder>()
+                            .ok_or(Error::BadArg)?
+                            .append_value(val);
+                    }
+                )*
+                $(
+                    DataType::Timestamp(TimeUnit::$unit, _) => {
+                        let val = term.decode::<i64>()?;
+                        builder
+                            .as_any_mut()
+                            .downcast_mut::<$ts_builder>()
+                            .ok_or(Error::BadArg)?
+                            .append_value(val);
+                    }
+                )*
+                unimplemented => {
+                    return Err(Error::Term(Box::new(format!(
+                        "unsupported type: {unimplemented}"
+                    ))));
+                }
+            };
+            Ok(())
+        }
+    };
 }
 
-pub fn append_value_to_builder(
-    builder: &mut Box<dyn ArrayBuilder>,
-    term: Term,
-    data_type: &DataType,
-) {
-    match data_type {
-        DataType::Int8 => {
-            let val = term.decode::<i8>().unwrap();
-            builder
-                .as_any_mut()
-                .downcast_mut::<Int8Builder>()
-                .unwrap()
-                .append_value(val)
-        }
-        DataType::Int16 => {
-            let val = term.decode::<i16>().unwrap();
-            builder
-                .as_any_mut()
-                .downcast_mut::<Int16Builder>()
-                .unwrap()
-                .append_value(val)
-        }
-        DataType::Int32 => {
-            let val = term.decode::<i32>().unwrap();
-            builder
-                .as_any_mut()
-                .downcast_mut::<Int32Builder>()
-                .unwrap()
-                .append_value(val)
-        }
-        DataType::Int64 => {
-            let val = term.decode::<i64>().unwrap();
-            builder
-                .as_any_mut()
-                .downcast_mut::<Int64Builder>()
-                .unwrap()
-                .append_value(val)
-        }
-        DataType::UInt8 => {
-            let val = term.decode::<u8>().unwrap();
-            builder
-                .as_any_mut()
-                .downcast_mut::<UInt8Builder>()
-                .unwrap()
-                .append_value(val)
-        }
-        DataType::UInt16 => {
-            let val = term.decode::<u16>().unwrap();
-            builder
-                .as_any_mut()
-                .downcast_mut::<UInt16Builder>()
-                .unwrap()
-                .append_value(val)
-        }
-        DataType::UInt32 => {
-            let val = term.decode::<u32>().unwrap();
-            builder
-                .as_any_mut()
-                .downcast_mut::<UInt32Builder>()
-                .unwrap()
-                .append_value(val)
-        }
-        DataType::UInt64 => {
-            let val = term.decode::<u64>().unwrap();
-            builder
-                .as_any_mut()
-                .downcast_mut::<UInt64Builder>()
-                .unwrap()
-                .append_value(val)
-        }
-        DataType::Float32 => {
-            let val = term.decode::<f32>().unwrap();
-            builder
-                .as_any_mut()
-                .downcast_mut::<Float32Builder>()
-                .unwrap()
-                .append_value(val)
-        }
-        DataType::Float64 => {
-            let val = term.decode::<f64>().unwrap();
-            builder
-                .as_any_mut()
-                .downcast_mut::<Float64Builder>()
-                .unwrap()
-                .append_value(val)
-        }
-        DataType::Boolean => {
-            let val = term.decode::<bool>().unwrap();
-            builder
-                .as_any_mut()
-                .downcast_mut::<BooleanBuilder>()
-                .unwrap()
-                .append_value(val)
-        }
-        DataType::Timestamp(TimeUnit::Millisecond, _) => {
-            let val = term.decode::<i64>().unwrap();
-            builder
-                .as_any_mut()
-                .downcast_mut::<TimestampMillisecondBuilder>()
-                .unwrap()
-                .append_value(val)
-        }
-        DataType::Utf8 => {
-            let val = term.decode::<String>().unwrap();
-            builder
-                .as_any_mut()
-                .downcast_mut::<StringBuilder>()
-                .unwrap()
-                .append_value(val)
-        }
-        _ => unimplemented!(),
-    };
+// https://docs.datalayers.cn/datalayers/latest/sql-reference/data-type.html
+define_type_handling_functions! {
+    standard_types: [
+        (Int8, Int8Builder, i8),
+        (Int16, Int16Builder, i16),
+        (Int32, Int32Builder, i32),
+        (Int64, Int64Builder, i64),
+        (UInt8, UInt8Builder, u8),
+        (UInt16, UInt16Builder, u16),
+        (UInt32, UInt32Builder, u32),
+        (UInt64, UInt64Builder, u64),
+        (Float32, Float32Builder, f32),
+        (Float64, Float64Builder, f64),
+        (Boolean, BooleanBuilder, bool),
+        (Utf8, StringBuilder, String),
+    ],
+    timestamp_types: [
+        (Second, TimestampSecondBuilder),
+        (Millisecond, TimestampMillisecondBuilder),
+        (Microsecond, TimestampMicrosecondBuilder),
+        (Nanosecond, TimestampNanosecondBuilder),
+    ]
 }

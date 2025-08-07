@@ -1,0 +1,42 @@
+name: Try MacOS Build
+
+on:
+  workflow_call:
+  workflow_dispatch:
+    inputs:
+      ref:
+        required: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  mac:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+        - macos-15
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        ref: ${{ github.event.inputs.ref }}
+
+    - name: Setup Erlang
+      uses: erlef/setup-beam@v1
+      with:
+        otp-version: '27.2.3'
+        rebar3-version: '3.24.0'
+
+    - name: Try Build
+      run: |
+        make
+        ldd priv/libdatalayers_nif.so >> /dev/null

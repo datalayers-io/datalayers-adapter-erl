@@ -7,13 +7,16 @@
 
 -define(datalayers_version, <<"2.3.8">>).
 
--define(create_database, <<"CREATE DATABASE common_test">>).
+-define(conn_opts(Config), ?config(conn_opts, Config)).
+-define(database(Config), ?config(database, Config)).
+-define(table(Config), ?config(table, Config)).
 
--define(drop_database, <<"DROP DATABASE common_test">>).
+-define(create_database(Config), <<"CREATE DATABASE IF NOT EXISTS ", (?database(Config))/binary>>).
+-define(drop_database(Config), <<"DROP DATABASE IF EXISTS ", (?database(Config))/binary>>).
 
 %% erlfmt-ignore
--define(create_table, <<"
-    CREATE TABLE common_test.demo (
+-define(create_table(Config), <<"
+    CREATE TABLE IF NOT EXISTS ", (?database(Config))/binary, ".", (?table(Config))/binary, " (
         ts TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         sid INT32,
         value REAL,
@@ -23,26 +26,22 @@
     PARTITION BY HASH(sid) PARTITIONS 8
     ENGINE=TimeSeries;
 ">>).
+-define(drop_table(Config),
+    <<"DROP TABLE IF EXISTS ", (?database(Config))/binary, ".", (?table(Config))/binary>>
+).
 
--define(drop_table, <<"DROP TABLE IF EXISTS common_test.demo">>).
+-define(insert_prepare_sql_statement(Config),
+    <<"INSERT INTO ", (?database(Config))/binary, ".", (?table(Config))/binary,
+        " (ts, sid, value, flag) VALUES (?, ?, ?, ?);">>
+).
 
-%% erlfmt-ignore
--define(create_nullable_table, <<"
-    CREATE TABLE common_test.demo_nullable (
-        ts TIMESTAMP NOT NULL,
-        sid INT32,
-        value REAL,
-        flag INT8,
-        note STRING NULL,
-        timestamp key(ts)
+-define(select_all_from_table_by_ts(Config, Timestamp),
+    iolist_to_binary(
+        io_lib:format("SELECT * FROM ~s.~s WHERE ts = ~p", [
+            ?database(Config), ?table(Config), Timestamp
+        ])
     )
-    PARTITION BY HASH(sid) PARTITIONS 8
-    ENGINE=TimeSeries;
-">>).
-
--define(drop_nullable_table, <<"DROP TABLE IF EXISTS common_test.demo_nullable">>).
-
--define(conn_opts(Config), ?config(conn_opts, Config)).
+).
 
 all() ->
     [
@@ -57,7 +56,8 @@ groups() ->
         t_prepare_test,
         t_invalid_ref_test,
         t_prepare_invalid_params_test,
-        t_prepare_with_null_test
+        t_prepare_with_null_test,
+        t_empty_batch
     ],
     [
         {tcp, TCs},
@@ -78,9 +78,7 @@ init_per_group(tcp, Config) ->
         username => <<"admin">>,
         password => <<"public">>
     },
-    NConfig = [{conn_opts, ConnOpts} | Config],
-    ensure_database_and_table(NConfig),
-    NConfig;
+    [{conn_opts, ConnOpts} | Config];
 init_per_group(tls, Config) ->
     Host = get_host_addr("DATALAYERS_TLS_ADDR"),
     Dir = code:lib_dir(datalayers),
@@ -92,18 +90,20 @@ init_per_group(tls, Config) ->
         password => <<"public">>,
         tls_cert => Cacertfile
     },
-    NConfig = [{conn_opts, ConnOpts} | Config],
+    [{conn_opts, ConnOpts} | Config].
+
+end_per_group(_GroupName, _Config) ->
+    ok.
+
+init_per_testcase(TestCase, Config) ->
+    Database = <<(atom_to_binary(TestCase))/binary, "_db">>,
+    Table = <<(atom_to_binary(TestCase))/binary, "_table">>,
+    NConfig = [{database, Database}, {table, Table} | Config],
     ensure_database_and_table(NConfig),
     NConfig.
 
-end_per_group(_GroupName, Config) ->
+end_per_testcase(_TestCase, Config) ->
     drop_database_and_table(Config),
-    ok.
-
-init_per_testcase(_TestCase, Config) ->
-    Config.
-
-end_per_testcase(_TestCase, _Config) ->
     ok.
 
 t_connect_test(Config) ->
@@ -118,8 +118,8 @@ t_stop_test(Config) ->
     %% stop is cast
     ct:sleep(100),
     try
-        datalayers:execute(
-            Client, ?create_database
+        do_execute(
+            Client, <<"SELECT version()">>
         )
     catch
         exit:{noproc, _}:_ -> ok;
@@ -130,7 +130,7 @@ t_prepare_test(Config) ->
     {ok, Client} = datalayers:connect(?conn_opts(Config)),
     {ok, PreparedStatement} = datalayers:prepare(
         Client,
-        <<"INSERT INTO common_test.demo (ts, sid, value, flag) VALUES (?, ?, ?, ?);">>
+        ?insert_prepare_sql_statement(Config)
     ),
     {ok, _} = datalayers:execute_prepare(Client, PreparedStatement, [
         [erlang:system_time(millisecond), 1, 42.0, 1],
@@ -172,7 +172,7 @@ t_prepare_invalid_params_test(Config) ->
     {ok, Client} = datalayers:connect(?conn_opts(Config)),
     {ok, PreparedStatement} = datalayers:prepare(
         Client,
-        <<"INSERT INTO common_test.demo (ts, sid, value, flag) VALUES (?, ?, ?, ?);">>
+        ?insert_prepare_sql_statement(Config)
     ),
 
     %% Case 1: Too few parameters
@@ -190,18 +190,16 @@ t_prepare_with_null_test(Config) ->
     {ok, Client} = datalayers:connect(?conn_opts(Config)),
     {ok, PreparedStatement} = datalayers:prepare(
         Client,
-        <<"INSERT INTO common_test.demo_nullable (ts, sid, value, flag, note) VALUES (?, ?, ?, ?, ?);">>
+        ?insert_prepare_sql_statement(Config)
     ),
 
     Timestamp = erlang:system_time(millisecond),
-    Params = [[Timestamp, 1, 42.0, null, null]],
+    Params = [[Timestamp, 1, 42.0, null]],
     {ok, _} = datalayers:execute_prepare(Client, PreparedStatement, Params),
 
-    {ok, [[_, _, _, <<>>, <<>>]]} = datalayers:execute(
+    {ok, [[_, _, _, <<>>]]} = do_execute(
         Client,
-        iolist_to_binary(
-            io_lib:format("SELECT * FROM common_test.demo_nullable WHERE ts = ~p", [Timestamp])
-        )
+        ?select_all_from_table_by_ts(Config, Timestamp)
     ),
 
     {ok, _} = datalayers:close_prepared(Client, PreparedStatement),
@@ -219,16 +217,24 @@ get_host_addr(Env) ->
 
 ensure_database_and_table(Config) ->
     {ok, Client} = datalayers:connect(?conn_opts(Config)),
-    {ok, _} = datalayers:execute(Client, ?create_database),
-    {ok, _} = datalayers:execute(Client, ?create_table),
-    {ok, _} = datalayers:execute(Client, ?create_nullable_table),
-    {ok, [[?datalayers_version]]} = datalayers:execute(Client, <<"SELECT version()">>),
+    {ok, [[Vsn]]} = do_execute(Client, <<"SELECT version()">>),
+    ?assertEqual(?datalayers_version, Vsn),
+    ct:pal("Expected Datalayers version: ~s, The Running version ~s", [?datalayers_version, Vsn]),
+
+    {ok, _} = do_execute(Client, ?drop_table(Config)),
+    {ok, _} = do_execute(Client, ?drop_database(Config)),
+
+    {ok, _} = do_execute(Client, ?create_database(Config)),
+    {ok, _} = do_execute(Client, ?create_table(Config)),
+
     ok = datalayers:stop(Client),
     Config.
 
 drop_database_and_table(Config) ->
     {ok, Client} = datalayers:connect(?conn_opts(Config)),
-    {ok, _} = datalayers:execute(Client, ?drop_table),
-    {ok, _} = datalayers:execute(Client, ?drop_nullable_table),
-    {ok, _} = datalayers:execute(Client, ?drop_database),
+    {ok, _} = do_execute(Client, ?drop_table(Config)),
+    {ok, _} = do_execute(Client, ?drop_database(Config)),
     ok = datalayers:stop(Client).
+
+do_execute(Client, SQL) ->
+    {ok, _} = datalayers:execute(Client, SQL).

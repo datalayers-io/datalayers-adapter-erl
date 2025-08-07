@@ -82,6 +82,9 @@ handle_info(_, State) ->
     %% Ignore other messages
     {noreply, State}.
 
+handle_cast(stop, State = ?client_ref(undefined)) ->
+    %% Client Ref already stopped or never connected, ignore
+    {stop, normal, State};
 handle_cast(stop, State = ?client_ref(ClientRef)) ->
     _ = datalayers_nif:stop(ClientRef),
     {stop, normal, State#state{client = undefined}}.

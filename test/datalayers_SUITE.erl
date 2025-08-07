@@ -7,7 +7,7 @@
 
 -compile([export_all, nowarn_export_all]).
 
--define(datalayers_version, <<"2.3.6">>).
+-define(datalayers_version, <<"2.3.8">>).
 
 -define(create_database, <<"CREATE DATABASE common_test">>).
 

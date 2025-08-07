@@ -3,8 +3,6 @@
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("common_test/include/ct.hrl").
 
--define(host, get_host_addr()).
-
 -compile([export_all, nowarn_export_all]).
 
 -define(datalayers_version, <<"2.3.8">>).
@@ -44,41 +42,62 @@
 
 -define(drop_nullable_table, <<"DROP TABLE IF EXISTS common_test.demo_nullable">>).
 
-suite() -> [].
+-define(conn_opts(Config), ?config(conn_opts, Config)).
 
 all() ->
     [
-        connect_test,
-        stop_test,
-        prepare_test,
-        invalid_ref_test,
-        prepare_invalid_params_test,
-        prepare_with_null_test
+        {group, tcp},
+        {group, tls}
     ].
 
-groups() -> [].
+groups() ->
+    TCs = [
+        t_connect_test,
+        t_stop_test,
+        t_prepare_test,
+        t_invalid_ref_test,
+        t_prepare_invalid_params_test,
+        t_prepare_with_null_test
+    ],
+    [
+        {tcp, TCs},
+        {tls, TCs}
+    ].
 
 init_per_suite(Config) ->
-    %% Initialize the configuration for the test suite
-    {ok, Client} = datalayers:connect(#{host => ?host}),
-    {ok, _} = datalayers:execute(Client, ?create_database),
-    {ok, _} = datalayers:execute(Client, ?create_table),
-    {ok, _} = datalayers:execute(Client, ?create_nullable_table),
-    {ok, [[?datalayers_version]]} = datalayers:execute(Client, <<"SELECT version()">>),
-    ok = datalayers:stop(Client),
     Config.
 
 end_per_suite(_Config) ->
-    {ok, Client} = datalayers:connect(#{host => ?host}),
-    {ok, _} = datalayers:execute(Client, ?drop_table),
-    {ok, _} = datalayers:execute(Client, ?drop_nullable_table),
-    {ok, _} = datalayers:execute(Client, ?drop_database),
-    ok = datalayers:stop(Client).
+    ok.
 
-init_per_group(_GroupName, Config) ->
-    Config.
+init_per_group(tcp, Config) ->
+    Host = get_host_addr("DATALAYERS_TCP_ADDR"),
+    ConnOpts = #{
+        host => Host,
+        port => 8360,
+        username => <<"admin">>,
+        password => <<"public">>
+    },
+    NConfig = [{conn_opts, ConnOpts} | Config],
+    ensure_database_and_table(NConfig),
+    NConfig;
+init_per_group(tls, Config) ->
+    Host = get_host_addr("DATALAYERS_TLS_ADDR"),
+    Dir = code:lib_dir(datalayers),
+    Cacertfile = filename:join([Dir, <<"test/data/certs">>, <<"ca.crt">>]),
+    ConnOpts = #{
+        host => Host,
+        port => 8360,
+        username => <<"admin">>,
+        password => <<"public">>,
+        tls_cert => Cacertfile
+    },
+    NConfig = [{conn_opts, ConnOpts} | Config],
+    ensure_database_and_table(NConfig),
+    NConfig.
 
-end_per_group(_GroupName, _Config) ->
+end_per_group(_GroupName, Config) ->
+    drop_database_and_table(Config),
     ok.
 
 init_per_testcase(_TestCase, Config) ->
@@ -87,14 +106,14 @@ init_per_testcase(_TestCase, Config) ->
 end_per_testcase(_TestCase, _Config) ->
     ok.
 
-connect_test(_Config) ->
-    {ok, Client} = datalayers:connect(#{host => ?host}),
+t_connect_test(Config) ->
+    {ok, Client} = datalayers:connect(?conn_opts(Config)),
     ?assert(is_pid(Client)),
     _ = datalayers:stop(Client),
     ok.
 
-stop_test(_Config) ->
-    {ok, Client} = datalayers:connect(#{host => ?host}),
+t_stop_test(Config) ->
+    {ok, Client} = datalayers:connect(?conn_opts(Config)),
     ok = datalayers:stop(Client),
     %% stop is cast
     ct:sleep(100),
@@ -107,8 +126,8 @@ stop_test(_Config) ->
         _ -> ?assert(false, "Expected no process error")
     end.
 
-prepare_test(_Config) ->
-    {ok, Client} = datalayers:connect(#{host => ?host}),
+t_prepare_test(Config) ->
+    {ok, Client} = datalayers:connect(?conn_opts(Config)),
     {ok, PreparedStatement} = datalayers:prepare(
         Client,
         <<"INSERT INTO common_test.demo (ts, sid, value, flag) VALUES (?, ?, ?, ?);">>
@@ -120,8 +139,8 @@ prepare_test(_Config) ->
     {ok, _} = datalayers:close_prepared(Client, PreparedStatement),
     ok = datalayers:stop(Client).
 
-invalid_ref_test(_Config) ->
-    {ok, ClientRef} = datalayers_nif:connect(#{host => ?host}),
+t_invalid_ref_test(Config) ->
+    {ok, ClientRef} = datalayers_nif:connect(?conn_opts(Config)),
     InvalidRef = make_ref(),
 
     ?assertMatch(
@@ -149,8 +168,8 @@ invalid_ref_test(_Config) ->
 
     ok = datalayers_nif:stop(ClientRef).
 
-prepare_invalid_params_test(_Config) ->
-    {ok, Client} = datalayers:connect(#{host => ?host}),
+t_prepare_invalid_params_test(Config) ->
+    {ok, Client} = datalayers:connect(?conn_opts(Config)),
     {ok, PreparedStatement} = datalayers:prepare(
         Client,
         <<"INSERT INTO common_test.demo (ts, sid, value, flag) VALUES (?, ?, ?, ?);">>
@@ -167,8 +186,8 @@ prepare_invalid_params_test(_Config) ->
     {ok, _} = datalayers:close_prepared(Client, PreparedStatement),
     ok = datalayers:stop(Client).
 
-prepare_with_null_test(_Config) ->
-    {ok, Client} = datalayers:connect(#{host => ?host}),
+t_prepare_with_null_test(Config) ->
+    {ok, Client} = datalayers:connect(?conn_opts(Config)),
     {ok, PreparedStatement} = datalayers:prepare(
         Client,
         <<"INSERT INTO common_test.demo_nullable (ts, sid, value, flag, note) VALUES (?, ?, ?, ?, ?);">>
@@ -188,8 +207,28 @@ prepare_with_null_test(_Config) ->
     {ok, _} = datalayers:close_prepared(Client, PreparedStatement),
     ok = datalayers:stop(Client).
 
-get_host_addr() ->
-    case os:getenv("DATALAYERS_TCP_ADDR") of
+%% ================================================================================
+%% Helpers
+%% ================================================================================
+
+get_host_addr(Env) ->
+    case os:getenv(Env) of
         false -> <<"localhost">>;
         Host -> iolist_to_binary(Host)
     end.
+
+ensure_database_and_table(Config) ->
+    {ok, Client} = datalayers:connect(?conn_opts(Config)),
+    {ok, _} = datalayers:execute(Client, ?create_database),
+    {ok, _} = datalayers:execute(Client, ?create_table),
+    {ok, _} = datalayers:execute(Client, ?create_nullable_table),
+    {ok, [[?datalayers_version]]} = datalayers:execute(Client, <<"SELECT version()">>),
+    ok = datalayers:stop(Client),
+    Config.
+
+drop_database_and_table(Config) ->
+    {ok, Client} = datalayers:connect(?conn_opts(Config)),
+    {ok, _} = datalayers:execute(Client, ?drop_table),
+    {ok, _} = datalayers:execute(Client, ?drop_nullable_table),
+    {ok, _} = datalayers:execute(Client, ?drop_database),
+    ok = datalayers:stop(Client).

@@ -1,9 +1,37 @@
 services:
+
   datalayers_server_tcp:
     container_name: datalayers_tcp
     image: datalayers/datalayers:${DATALAYERS_TAG}
-    expose:
-      - "8361"
     environment:
       DATALAYERS_SERVER__TIMEZONE: "Etc/GMT"
     restart: always
+    networks:
+      datalayers_bridge:
+        ipv4_address: 172.100.100.10
+
+  datalayers_server_tls:
+    container_name: datalayers_tls
+    image: datalayers/datalayers:${DATALAYERS_TAG}
+    environment:
+      DATALAYERS_SERVER__TIMEZONE: "Etc/GMT"
+      DATALAYERS_SERVER__TLS__KEY: "/etc/datalayers/key.pem"
+      DATALAYERS_SERVER__TLS__CERT: "/etc/datalayers/cert.pem"
+    volumes:
+      - ./certs/ca.crt:/etc/datalayers/cacert.pem
+      - ./certs/server.crt:/etc/datalayers/cert.pem
+      - ./certs/server.key:/etc/datalayers/key.pem
+    restart: always
+    networks:
+      datalayers_bridge:
+        ipv4_address: 172.100.100.20
+
+networks:
+  datalayers_bridge:
+    driver: bridge
+    name: datalayers_bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.100.100.0/24
+          gateway: 172.100.100.1

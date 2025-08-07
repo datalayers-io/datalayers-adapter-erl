@@ -39,4 +39,4 @@ jobs:
     - name: Try Build
       run: |
         make
-        ldd priv/libdatalayers_nif.so >> /dev/null
+        otool -L priv/libdatalayers_nif.so >> /dev/null

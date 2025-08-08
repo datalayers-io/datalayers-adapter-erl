@@ -134,6 +134,7 @@ fn execute_prepare<'a>(
         if let (Some(client), Some(statement)) = (&mut *client_guard, &mut *statement_guard) {
             let binding = match util::params_to_record_batch(statement, params) {
                 Ok(rb) => rb,
+                Err(rustler::Error::BadArg) => return Ok((error(), "badarg").encode(env)),
                 Err(e) => return Ok((error(), format!("invalid_params: {e:?}")).encode(env)),
             };
 

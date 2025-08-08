@@ -40,12 +40,6 @@ jobs:
           otp-version: '27.2.3'
           rebar3-version: '3.24.0'
 
-      # - name: Setup Rust
-      #   uses: actions-rs/toolchain@v1
-      #   with:
-      #     toolchain: stable
-      #     components: rustfmt, clippy
-
       - name: Check Rust format
         run: |
           cargo fmt --check
@@ -94,9 +88,15 @@ jobs:
       run: |
         cargo test
 
+  try_macos_build:
+    needs: sanity_check
+    uses: ./.github/workflows/try_macos_build.yaml
+
   common_test:
     runs-on: ubuntu-latest
-    needs: sanity_check
+    needs:
+    - sanity_check
+    - try_macos_build
 
     steps:
     - name: Checkout Code
@@ -113,8 +113,12 @@ jobs:
     - name: Start Datalayers Container
       run: |
         docker compose -f .ci/docker-compose-file/docker-compose-datalayers.yaml up -d
-        echo "export DATALAYERS_TCP_ADDR=$(docker container inspect datalayers_tcp -f \
-          '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')" \
+        echo \
+          "export DATALAYERS_TCP_ADDR=$(docker container inspect datalayers_tcp -f \
+            '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}') \
+                  DATALAYERS_TLS_ADDR=$(docker container inspect datalayers_tls -f \
+            '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}') \
+          " \
           | tee -a env.sh
 
     - name: Run Common Test

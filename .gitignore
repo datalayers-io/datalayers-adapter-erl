@@ -22,4 +22,3 @@ rebar3.crashdump
 
 libpath
 /target
-/Cargo.lock

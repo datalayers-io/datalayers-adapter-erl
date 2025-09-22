@@ -38,6 +38,33 @@ fn connect(env: Env, opts: ClientOpts) -> NifResult<Term> {
     Ok(result_term)
 }
 
+#[rustler::nif(schedule = "DirtyIo")]
+fn use_database<'a>(
+    env: Env<'a>,
+    resource_ref: Reference<'a>,
+    database: String,
+) -> NifResult<Term<'a>> {
+    let client_resource: ResourceArc<ClientResource> = match resource_ref.decode() {
+        Ok(r) => r,
+        Err(_) => return Ok((error(), "invalid_client_resource").encode(env)),
+    };
+
+    let mut client_guard = match client_resource.0.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            return Ok((error(), format!("lock poisoned: {poisoned}")).encode(env));
+        }
+    };
+
+    let result_term = if let Some(client) = &mut *client_guard {
+        client.use_database(&database);
+        (ok(), "database_changed").encode(env)
+    } else {
+        (error(), "client_stopped".to_string()).encode(env)
+    };
+    Ok(result_term)
+}
+
 /// execute a SQL query using the client resource.
 /// Return the result as a term.
 /// example:

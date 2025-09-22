@@ -11,7 +11,7 @@
 -type result() :: list().
 -type reason() :: binary().
 
--type command() :: connect | execute | prepare | execute_prepare | close_prepared.
+-type command() :: connect | use_database | execute | prepare | execute_prepare | close_prepared.
 -type args() :: term().
 -type callback() :: {function(), list()}.
 

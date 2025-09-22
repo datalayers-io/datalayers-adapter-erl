@@ -55,6 +55,10 @@ impl Client {
         })
     }
 
+    pub fn use_database(&mut self, database: &str) {
+        self.inner.set_header("database", database);
+    }
+
     pub async fn execute(&mut self, sql: &str) -> Result<Vec<RecordBatch>> {
         let flight_info = self.inner.execute(sql.to_string(), None).await?;
         let ticket = flight_info

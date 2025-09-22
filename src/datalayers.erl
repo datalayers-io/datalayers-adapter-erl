@@ -5,6 +5,8 @@
 -export([
     connect/1,
 
+    use_database/2,
+
     execute/2,
     prepare/2,
     execute_prepare/3,
@@ -45,6 +47,21 @@ connect(Opts) ->
         {error, _} = Err ->
             _ = stop(Pid),
             Err
+    end.
+
+-spec use_database(client(), binary()) -> ok.
+use_database(Client, DbName) ->
+    case datalayers:execute(Client, <<"SHOW DATABASES">>) of
+        {ok, DBs} ->
+            case lists:any(fun([DB, _Data]) -> DB =:= DbName end, DBs) of
+                true ->
+                    ?call(Client, [DbName]);
+                false ->
+                    {error,
+                        iolist_to_binary(io_lib:format("Database `~s` does not exist", [DbName]))}
+            end;
+        {error, _Reason} ->
+            {error, <<"Failed to fetch databases">>}
     end.
 
 -spec execute(client(), sql()) -> {ok, result()} | {error, reason()}.

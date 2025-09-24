@@ -53,6 +53,7 @@ groups() ->
     TCs = [
         t_connect_test,
         t_stop_test,
+        t_use_database,
         t_prepare_test,
         t_invalid_ref_test,
         t_prepare_invalid_params_test,
@@ -125,6 +126,22 @@ t_stop_test(Config) ->
         exit:{noproc, _}:_ -> ok;
         _ -> ?assert(false, "Expected no process error")
     end.
+
+t_use_database(Config) ->
+    {ok, Client} = datalayers:connect(?conn_opts(Config)),
+    ?assertMatch(
+        {ok, <<"database_changed">>},
+        datalayers:use_database(Client, ?database(Config))
+    ),
+
+    ?assertMatch(
+        {error, <<"Database `non_existed_db` does not exist">>},
+        datalayers:use_database(Client, <<"non_existed_db">>)
+    ),
+
+    {ok, [[Vsn]]} = do_execute(Client, <<"SELECT version()">>),
+    ?assertEqual(?datalayers_version, Vsn),
+    ok = datalayers:stop(Client).
 
 t_prepare_test(Config) ->
     {ok, Client} = datalayers:connect(?conn_opts(Config)),

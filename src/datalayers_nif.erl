@@ -2,6 +2,8 @@
 
 -export([
     connect/1,
+    use_database/2,
+
     execute/2,
 
     prepare/2,
@@ -28,6 +30,9 @@ init() ->
 %% NIFs
 
 connect(_Opts) ->
+    not_loaded(?LINE).
+
+use_database(_Client, _DbName) ->
     not_loaded(?LINE).
 
 execute(_Client, _Sql) ->

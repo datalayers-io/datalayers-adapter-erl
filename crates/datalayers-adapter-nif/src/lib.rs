@@ -41,15 +41,15 @@ fn connect(env: Env, opts: ClientOpts) -> NifResult<Term> {
 #[rustler::nif(schedule = "DirtyIo")]
 fn use_database<'a>(
     env: Env<'a>,
-    resource_ref: Reference<'a>,
+    client_resource_ref: Reference<'a>,
     database: String,
 ) -> NifResult<Term<'a>> {
-    let client_resource: ResourceArc<ClientResource> = match resource_ref.decode() {
+    let client_resource: ResourceArc<ClientResource> = match client_resource_ref.decode() {
         Ok(r) => r,
         Err(_) => return Ok((error(), "invalid_client_resource").encode(env)),
     };
 
-    let mut client_guard = match client_resource.0.lock() {
+    let mut client_guard = match client_resource.inner.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
             return Ok((error(), format!("lock poisoned: {poisoned}")).encode(env));
@@ -75,13 +75,17 @@ fn use_database<'a>(
 ///     ]} | {error, Reason}
 /// ```
 #[rustler::nif(schedule = "DirtyIo")]
-fn execute<'a>(env: Env<'a>, resource_ref: Reference<'a>, sql: String) -> NifResult<Term<'a>> {
-    let client_resource: ResourceArc<ClientResource> = match resource_ref.decode() {
+fn execute<'a>(
+    env: Env<'a>,
+    client_resource_ref: Reference<'a>,
+    sql: String,
+) -> NifResult<Term<'a>> {
+    let client_resource: ResourceArc<ClientResource> = match client_resource_ref.decode() {
         Ok(r) => r,
         Err(_) => return Ok((error(), "invalid_client_resource").encode(env)),
     };
 
-    let mut client_guard = match client_resource.0.lock() {
+    let mut client_guard = match client_resource.inner.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
             return Ok((error(), format!("lock poisoned: {poisoned}")).encode(env));
@@ -110,7 +114,7 @@ fn prepare<'a>(
         Err(_) => return Ok((error(), "invalid_client_resource").encode(env)),
     };
 
-    let mut client_guard = match client_resource.0.lock() {
+    let mut client_guard = match client_resource.inner.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
             return Ok((error(), format!("lock poisoned: {poisoned}")).encode(env));
@@ -144,13 +148,13 @@ fn execute_prepare<'a>(
             Err(_) => return Ok((error(), "invalid_statement_resource").encode(env)),
         };
 
-    let mut client_guard = match client_resource.0.lock() {
+    let mut client_guard = match client_resource.inner.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
             return Ok((error(), format!("client lock poisoned: {poisoned}")).encode(env));
         }
     };
-    let mut statement_guard = match statement_resource.0.lock() {
+    let mut statement_guard = match statement_resource.inner.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
             return Ok((error(), format!("statement lock poisoned: {poisoned}")).encode(env));
@@ -191,13 +195,13 @@ fn close_prepared<'a>(
             Err(_) => return Ok((error(), "invalid_statement_resource").encode(env)),
         };
 
-    let client_guard = match client_resource.0.lock() {
+    let client_guard = match client_resource.inner.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
             return Ok((error(), format!("client lock poisoned: {poisoned}")).encode(env));
         }
     };
-    let mut statement_guard = match statement_resource.0.lock() {
+    let mut statement_guard = match statement_resource.inner.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
             return Ok((error(), format!("statement lock poisoned: {poisoned}")).encode(env));
@@ -223,7 +227,7 @@ fn stop(client_resource_ref: Reference) -> rustler::Atom {
         Err(_) => return error(),
     };
 
-    let mut client_guard = match client_resource.0.lock() {
+    let mut client_guard = match client_resource.inner.lock() {
         Ok(guard) => guard,
         Err(_) => return error(),
     };

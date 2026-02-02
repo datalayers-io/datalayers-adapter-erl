@@ -37,7 +37,7 @@ if [ -z "${SYSTEM:-}" ]; then
 fi
 
 ARCH="$(uname -m)"
-VSN="$(git describe --tags --exact-match | head -1)"
+VSN="$(git describe --tags --exact-match | head -1 || git rev-parse --short HEAD)"
 
 if [ -z "$VSN" ]; then
     VSN="debug"

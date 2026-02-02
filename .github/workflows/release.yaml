@@ -28,9 +28,8 @@ jobs:
         otp:
           - "28.2-2"
         rebar3:
-          - "3.22.0"
+          - "3.24.0"
         os:
-          - macos-13
           - macos-14
           - macos-15
     runs-on: ${{ matrix.os }}

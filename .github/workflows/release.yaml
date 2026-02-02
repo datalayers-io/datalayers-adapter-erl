@@ -26,6 +26,7 @@ jobs:
       fail-fast: false
       matrix:
         otp:
+          - "27.3.4.2-6"
           - "28.2-2"
         rebar3:
           - "3.24.0"
@@ -59,6 +60,9 @@ jobs:
       fail-fast: false
       matrix:
         erlang:
+          - otp: "27.3.4.2-6"
+            elixir: "1.18.3"
+            builder: "6.0-9"
           - otp: "28.2-2"
             elixir: "1.19.1"
             builder: "6.0-9"

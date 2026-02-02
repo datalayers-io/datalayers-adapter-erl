@@ -108,6 +108,8 @@ jobs:
     needs:
       - mac
       - linux
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@65a9edc5881444af0b9093a5e628f2fe47ea3b2e # v4.1.7
         with:
@@ -115,7 +117,7 @@ jobs:
           path: packages
           merge-multiple: true
       - name: Create Release
-        uses: softprops/action-gh-release@69320dbe05506a9a39fc8ae11030b214ec2d1f87 # v2.0.5
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
         with:
           name: ${{ env.package_pretty_name }} ${{ github.event.inputs.release_as || github.ref_name }} Released
           tag_name: ${{ github.event.inputs.release_as || github.ref_name }}

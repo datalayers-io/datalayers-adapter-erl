@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+set -euo pipefail
+
 BUILD_SCRIPT="crates/datalayers-adapter-nif/build.rs"
 NIF_PATH="priv/libdatalayers_nif.so"
 

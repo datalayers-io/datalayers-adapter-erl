@@ -6,9 +6,14 @@ on:
       - "*"
   workflow_dispatch:
     inputs:
-      ref:
+      build_from:
+        description: |
+          Branch or tag to build release artifacts from.
         required: false
-      ref_name:
+      release_as:
+        description: |
+          Publish release under this tag, or update release assets if such release exists.
+          If empty, release publishing will be skipped.
         required: false
 
 env:
@@ -37,7 +42,7 @@ jobs:
 
       - uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4.1.6
         with:
-          ref: ${{ github.event.inputs.ref }}
+          ref: ${{ github.event.inputs.build_from }}
 
       - name: build
         run: env BUILD_RELEASE=1 make
@@ -76,7 +81,7 @@ jobs:
     steps:
       - uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4.1.6
         with:
-          ref: ${{ github.event.inputs.ref }}
+          ref: ${{ github.event.inputs.build_from }}
           submodules: recursive
         # NOTE: build in container does not work because older platforms like
         #       el7 and amzn2 do not support nodejs 20 runtime which is required
@@ -100,7 +105,7 @@ jobs:
 
   release:
     runs-on: ubuntu-latest
-    if: github.event.inputs.ref_name || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
+    if: github.event.inputs.release_as || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
     needs:
       - mac
       - linux
@@ -113,8 +118,8 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@69320dbe05506a9a39fc8ae11030b214ec2d1f87 # v2.0.5
         with:
-          name: ${{ env.package_pretty_name }} ${{ github.event.inputs.ref_name || github.ref_name }} Released
-          tag_name: ${{ github.event.inputs.ref_name || github.ref_name }}
+          name: ${{ env.package_pretty_name }} ${{ github.event.inputs.release_as || github.ref_name }} Released
+          tag_name: ${{ github.event.inputs.release_as || github.ref_name }}
           files: packages/*
           draft: false
           prerelease: false

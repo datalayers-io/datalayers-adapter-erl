@@ -5,9 +5,8 @@
 
 -compile([export_all, nowarn_export_all]).
 
--define(datalayers_version, <<"2.4.3">>).
-
 -define(conn_opts(Config), ?config(conn_opts, Config)).
+-define(version(Config), ?config(version, Config)).
 -define(database(Config), ?config(database, Config)).
 -define(table(Config), ?config(table, Config)).
 
@@ -68,7 +67,18 @@ groups() ->
     ].
 
 init_per_suite(Config) ->
-    Config.
+    Host = get_host_addr("DATALAYERS_TCP_ADDR"),
+    ConnOpts = #{
+        host => Host,
+        port => 8360,
+        username => <<"admin">>,
+        password => <<"public">>
+    },
+    {ok, Client} = datalayers:connect(ConnOpts),
+    {ok, [[Vsn]]} = do_execute(Client, <<"SELECT version()">>),
+    ct:pal("Datalayers version: ~s", [Vsn]),
+    datalayers:stop(Client),
+    [{version, Vsn} | Config].
 
 end_per_suite(_Config) ->
     ok.
@@ -142,7 +152,7 @@ t_use_database(Config) ->
     ),
 
     {ok, [[Vsn]]} = do_execute(Client, <<"SELECT version()">>),
-    ?assertEqual(?datalayers_version, Vsn),
+    ?assertEqual(?version(Config), Vsn),
     ok = datalayers:stop(Client).
 
 t_prepare_test(Config) ->
@@ -302,8 +312,8 @@ get_host_addr(Env) ->
 ensure_database_and_table(Config) ->
     {ok, Client} = datalayers:connect(?conn_opts(Config)),
     {ok, [[Vsn]]} = do_execute(Client, <<"SELECT version()">>),
-    ?assertEqual(?datalayers_version, Vsn),
-    ct:pal("Expected Datalayers version: ~s, The Running version ~s", [?datalayers_version, Vsn]),
+    ?assertEqual(?version(Config), Vsn),
+    ct:pal("Expected Datalayers version: ~s, The Running version ~s", [?version(Config), Vsn]),
 
     {ok, _} = do_execute(Client, ?drop_table(Config)),
     {ok, _} = do_execute(Client, ?drop_database(Config)),

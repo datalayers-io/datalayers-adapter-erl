@@ -245,6 +245,11 @@ t_prepare_auto_rebuild_test(Config) ->
     {ok, _} = datalayers:execute_prepare(Client, PreparedStatement, [
         [Timestamp, 1, 42.0, 1]
     ]),
+    %% Verify data was actually written
+    ?assertMatch(
+        {ok, [[_, <<"1">>, <<"42.0">>, <<"1">>]]},
+        do_execute(Client, ?select_all_from_table_by_ts(Config, Timestamp))
+    ),
     %% Close prepared on server side
     {ok, _} = datalayers:close_prepared(Client, PreparedStatement),
     %% Should auto-rebuild and succeed
@@ -254,6 +259,11 @@ t_prepare_auto_rebuild_test(Config) ->
         datalayers:execute_prepare(Client, PreparedStatement, [
             [Timestamp2, 2, 43.0, 0]
         ])
+    ),
+    %% Verify data from auto-rebuilt statement was actually written
+    ?assertMatch(
+        {ok, [[_, <<"2">>, <<"43.0">>, <<"0">>]]},
+        do_execute(Client, ?select_all_from_table_by_ts(Config, Timestamp2))
     ),
     ok = datalayers:stop(Client).
 

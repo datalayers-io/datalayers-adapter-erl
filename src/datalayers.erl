@@ -101,7 +101,7 @@ async_execute(Client, Sql, ResultCallback) ->
 
 -spec async_prepare(client(), sql(), callback()) -> ok.
 async_prepare(Client, Sql, ResultCallback) ->
-    ?async(Client, [Sql], ResultCallback).
+    ?async(Client, [Sql, false], ResultCallback).
 
 -spec async_execute_prepare(client(), prepared_statement(), params(), callback()) -> ok.
 async_execute_prepare(Client, Statement, Params, ResultCallback) ->

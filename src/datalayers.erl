@@ -9,6 +9,7 @@
 
     execute/2,
     prepare/2,
+    prepare/3,
     execute_prepare/3,
 
     close_prepared/2,
@@ -70,7 +71,13 @@ execute(Client, Sql) ->
 
 -spec prepare(client(), sql()) -> {ok, prepared_statement()} | {error, reason()}.
 prepare(Client, Sql) ->
-    ?call(Client, [Sql]).
+    prepare(Client, Sql, #{auto_rebuild => false}).
+
+-spec prepare(client(), sql(), #{auto_rebuild => boolean()}) ->
+    {ok, prepared_statement()} | {error, reason()}.
+prepare(Client, Sql, Opts) ->
+    AutoRebuild = maps:get(auto_rebuild, Opts, false),
+    ?call(Client, [Sql, AutoRebuild]).
 
 -spec execute_prepare(client(), prepared_statement(), params()) ->
     {ok, result()} | {error, reason()}.

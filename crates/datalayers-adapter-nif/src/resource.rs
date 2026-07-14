@@ -23,14 +23,22 @@ impl ClientResource {
 /// A resource that holds a prepared statement for executing SQL queries.
 pub struct PreparedStatementResource {
     pub inner: Mutex<Option<PreparedStatement<Channel>>>,
+    pub sql: String,
+    pub auto_rebuild: bool,
 }
 
 impl rustler::Resource for PreparedStatementResource {}
 
 impl PreparedStatementResource {
-    pub fn new(statement: PreparedStatement<Channel>) -> ResourceArc<Self> {
+    pub fn new(
+        statement: PreparedStatement<Channel>,
+        sql: String,
+        auto_rebuild: bool,
+    ) -> ResourceArc<Self> {
         ResourceArc::new(Self {
             inner: Mutex::new(Some(statement)),
+            sql,
+            auto_rebuild,
         })
     }
 }

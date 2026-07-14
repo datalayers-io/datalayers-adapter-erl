@@ -6,7 +6,7 @@
 
     execute/2,
 
-    prepare/2,
+    prepare/3,
     execute_prepare/3,
     close_prepared/2,
 
@@ -38,7 +38,7 @@ use_database(_Client, _DbName) ->
 execute(_Client, _Sql) ->
     not_loaded(?LINE).
 
-prepare(_Client, _Sql) ->
+prepare(_Client, _Sql, _AutoRebuild) ->
     not_loaded(?LINE).
 
 execute_prepare(_Client, _Statement, _Params) ->

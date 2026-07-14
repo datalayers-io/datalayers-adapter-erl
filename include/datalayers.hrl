@@ -17,6 +17,7 @@
 
 -type prepared_statement() :: reference().
 -type params() :: list().
+-type prepare_opts() :: #{auto_rebuild => boolean()}.
 
 -define(NIF_MODULE, datalayers_nif).
 

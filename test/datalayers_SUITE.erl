@@ -164,7 +164,8 @@ t_invalid_ref_test(Config) ->
         {error, <<"invalid_client_resource">>}, datalayers_nif:execute(InvalidRef, <<"SELECT 1">>)
     ),
     ?assertMatch(
-        {error, <<"invalid_client_resource">>}, datalayers_nif:prepare(InvalidRef, <<"SELECT 1">>)
+        {error, <<"invalid_client_resource">>},
+        datalayers_nif:prepare(InvalidRef, <<"SELECT 1">>, false)
     ),
     ?assertMatch(
         {error, <<"invalid_client_resource">>},

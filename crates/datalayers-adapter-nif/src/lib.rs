@@ -16,6 +16,15 @@ use lazy_static::lazy_static;
 use rustler::{Encoder, Env, NifResult, Reference, ResourceArc, Term};
 use tokio::runtime::Runtime;
 
+fn is_prepared_statement_lost(err: &anyhow::Error) -> bool {
+    for cause in err.chain() {
+        if let Some(status) = cause.downcast_ref::<tonic::Status>() {
+            return status.code() == tonic::Code::NotFound;
+        }
+    }
+    false
+}
+
 rustler::init!("datalayers_nif", load = on_load);
 
 lazy_static! {
@@ -108,6 +117,7 @@ fn prepare<'a>(
     env: Env<'a>,
     client_resource_ref: Reference<'a>,
     sql: String,
+    auto_rebuild: bool,
 ) -> NifResult<Term<'a>> {
     let client_resource: ResourceArc<ClientResource> = match client_resource_ref.decode() {
         Ok(r) => r,
@@ -122,7 +132,11 @@ fn prepare<'a>(
     };
     let result_term = if let Some(client) = &mut *client_guard {
         match RT.block_on(client.prepare(&sql)) {
-            Ok(statement) => (ok(), PreparedStatementResource::new(statement)).encode(env),
+            Ok(statement) => (
+                ok(),
+                PreparedStatementResource::new(statement, sql, auto_rebuild),
+            )
+                .encode(env),
             Err(e) => (error(), e.to_string()).encode(env),
         }
     } else {
@@ -171,7 +185,35 @@ fn execute_prepare<'a>(
 
             match RT.block_on(client.execute_prepared(statement, binding)) {
                 Ok(result) => (ok(), util::record_batch_to_term(&result[..])).encode(env),
-                Err(e) => (error(), e.to_string()).encode(env),
+                Err(e) => {
+                    if statement_resource.auto_rebuild && is_prepared_statement_lost(&e) {
+                        match RT.block_on(client.prepare(&statement_resource.sql)) {
+                            Ok(new_statement) => {
+                                *statement = new_statement;
+                                let binding2 = match util::params_to_record_batch(statement, params)
+                                {
+                                    Ok(rb) => rb,
+                                    Err(rustler::Error::BadArg) => {
+                                        return Ok((error(), "badarg").encode(env));
+                                    }
+                                    Err(e2) => {
+                                        return Ok((error(), format!("invalid_params: {e2:?}"))
+                                            .encode(env));
+                                    }
+                                };
+                                match RT.block_on(client.execute_prepared(statement, binding2)) {
+                                    Ok(result) => {
+                                        (ok(), util::record_batch_to_term(&result[..])).encode(env)
+                                    }
+                                    Err(e2) => (error(), e2.to_string()).encode(env),
+                                }
+                            }
+                            Err(rebuild_err) => (error(), rebuild_err.to_string()).encode(env),
+                        }
+                    } else {
+                        (error(), e.to_string()).encode(env)
+                    }
+                }
             }
         } else {
             (error(), "client_or_statement_stopped".to_string()).encode(env)

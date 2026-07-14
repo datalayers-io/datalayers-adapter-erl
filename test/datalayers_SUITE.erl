@@ -58,7 +58,9 @@ groups() ->
         t_invalid_ref_test,
         t_prepare_invalid_params_test,
         t_prepare_with_null_test,
-        t_empty_batch
+        t_empty_batch,
+        t_prepare_auto_rebuild_test,
+        t_prepare_no_rebuild_test
     ],
     [
         {tcp, TCs},
@@ -231,6 +233,51 @@ t_empty_batch(Config) ->
         {ok, []}, do_execute(Client, ?select_all_from_table_by_ts(Config, Timestamp))
     ),
     datalayers:stop(Client).
+
+t_prepare_auto_rebuild_test(Config) ->
+    {ok, Client} = datalayers:connect(?conn_opts(Config)),
+    {ok, PreparedStatement} = datalayers:prepare(
+        Client,
+        ?insert_prepare_sql_statement(Config),
+        #{auto_rebuild => true}
+    ),
+    Timestamp = erlang:system_time(millisecond),
+    {ok, _} = datalayers:execute_prepare(Client, PreparedStatement, [
+        [Timestamp, 1, 42.0, 1]
+    ]),
+    %% Close prepared on server side
+    {ok, _} = datalayers:close_prepared(Client, PreparedStatement),
+    %% Should auto-rebuild and succeed
+    Timestamp2 = erlang:system_time(millisecond),
+    ?assertMatch(
+        {ok, _},
+        datalayers:execute_prepare(Client, PreparedStatement, [
+            [Timestamp2, 2, 43.0, 0]
+        ])
+    ),
+    ok = datalayers:stop(Client).
+
+t_prepare_no_rebuild_test(Config) ->
+    {ok, Client} = datalayers:connect(?conn_opts(Config)),
+    {ok, PreparedStatement} = datalayers:prepare(
+        Client,
+        ?insert_prepare_sql_statement(Config)
+    ),
+    Timestamp = erlang:system_time(millisecond),
+    {ok, _} = datalayers:execute_prepare(Client, PreparedStatement, [
+        [Timestamp, 1, 42.0, 1]
+    ]),
+    %% Close prepared on server side
+    {ok, _} = datalayers:close_prepared(Client, PreparedStatement),
+    %% Should return error without auto_rebuild
+    Timestamp2 = erlang:system_time(millisecond),
+    ?assertMatch(
+        {error, _},
+        datalayers:execute_prepare(Client, PreparedStatement, [
+            [Timestamp2, 2, 43.0, 0]
+        ])
+    ),
+    ok = datalayers:stop(Client).
 
 %% ================================================================================
 %% Helpers

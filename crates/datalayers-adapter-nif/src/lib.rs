@@ -175,8 +175,8 @@ fn execute_prepare<'a>(
         }
     };
 
-    let result_term =
-        if let (Some(client), Some(statement)) = (&mut *client_guard, &mut *statement_guard) {
+    let result_term = if let Some(client) = &mut *client_guard {
+        if let Some(statement) = &mut *statement_guard {
             let binding = match util::params_to_record_batch(statement, params) {
                 Ok(rb) => rb,
                 Err(rustler::Error::BadArg) => return Ok((error(), "badarg").encode(env)),
@@ -187,38 +187,58 @@ fn execute_prepare<'a>(
                 Ok(result) => (ok(), util::record_batch_to_term(&result[..])).encode(env),
                 Err(e) => {
                     if statement_resource.auto_rebuild && is_prepared_statement_lost(&e) {
-                        match RT.block_on(client.prepare(&statement_resource.sql)) {
-                            Ok(new_statement) => {
-                                *statement = new_statement;
-                                let binding2 = match util::params_to_record_batch(statement, params)
-                                {
-                                    Ok(rb) => rb,
-                                    Err(rustler::Error::BadArg) => {
-                                        return Ok((error(), "badarg").encode(env));
-                                    }
-                                    Err(e2) => {
-                                        return Ok((error(), format!("invalid_params: {e2:?}"))
-                                            .encode(env));
-                                    }
-                                };
-                                match RT.block_on(client.execute_prepared(statement, binding2)) {
-                                    Ok(result) => {
-                                        (ok(), util::record_batch_to_term(&result[..])).encode(env)
-                                    }
-                                    Err(e2) => (error(), e2.to_string()).encode(env),
-                                }
-                            }
-                            Err(rebuild_err) => (error(), rebuild_err.to_string()).encode(env),
-                        }
+                        try_rebuild_and_execute(
+                            client,
+                            &statement_resource,
+                            statement_guard,
+                            params,
+                            env,
+                        )
                     } else {
                         (error(), e.to_string()).encode(env)
                     }
                 }
             }
+        } else if statement_resource.auto_rebuild {
+            try_rebuild_and_execute(client, &statement_resource, statement_guard, params, env)
         } else {
             (error(), "client_or_statement_stopped".to_string()).encode(env)
-        };
+        }
+    } else {
+        (error(), "client_or_statement_stopped".to_string()).encode(env)
+    };
     Ok(result_term)
+}
+
+fn try_rebuild_and_execute<'a>(
+    client: &mut Client,
+    statement_resource: &PreparedStatementResource,
+    mut statement_guard: std::sync::MutexGuard<
+        '_,
+        Option<arrow_flight::sql::client::PreparedStatement<tonic::transport::Channel>>,
+    >,
+    params: Term<'a>,
+    env: Env<'a>,
+) -> Term<'a> {
+    match RT.block_on(client.prepare(&statement_resource.sql)) {
+        Ok(mut new_statement) => {
+            let binding2 = match util::params_to_record_batch(&new_statement, params) {
+                Ok(rb) => rb,
+                Err(rustler::Error::BadArg) => return (error(), "badarg").encode(env),
+                Err(e2) => {
+                    return (error(), format!("invalid_params: {e2:?}")).encode(env);
+                }
+            };
+            match RT.block_on(client.execute_prepared(&mut new_statement, binding2)) {
+                Ok(result) => {
+                    *statement_guard = Some(new_statement);
+                    (ok(), util::record_batch_to_term(&result[..])).encode(env)
+                }
+                Err(e2) => (error(), e2.to_string()).encode(env),
+            }
+        }
+        Err(rebuild_err) => (error(), rebuild_err.to_string()).encode(env),
+    }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]

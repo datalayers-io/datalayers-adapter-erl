@@ -5,7 +5,7 @@
 
 -compile([export_all, nowarn_export_all]).
 
--define(datalayers_version, <<"2.3.8">>).
+-define(datalayers_version, <<"2.4.3">>).
 
 -define(conn_opts(Config), ?config(conn_opts, Config)).
 -define(database(Config), ?config(database, Config)).

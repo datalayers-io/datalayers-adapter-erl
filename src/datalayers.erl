@@ -17,6 +17,7 @@
 
     async_execute/3,
     async_prepare/3,
+    async_prepare/4,
     async_execute_prepare/4
 ]).
 
@@ -28,7 +29,8 @@
     reason/0,
     args/0,
     prepared_statement/0,
-    params/0
+    params/0,
+    prepare_opts/0
 ]).
 
 -define(call(Client, Args), call(Client, ?FUNCTION_NAME, Args)).
@@ -101,7 +103,12 @@ async_execute(Client, Sql, ResultCallback) ->
 
 -spec async_prepare(client(), sql(), callback()) -> ok.
 async_prepare(Client, Sql, ResultCallback) ->
-    ?async(Client, [Sql, false], ResultCallback).
+    async_prepare(Client, Sql, #{auto_rebuild => false}, ResultCallback).
+
+-spec async_prepare(client(), sql(), prepare_opts(), callback()) -> ok.
+async_prepare(Client, Sql, Opts, ResultCallback) ->
+    AutoRebuild = maps:get(auto_rebuild, Opts, false),
+    ?async(Client, [Sql, AutoRebuild], ResultCallback).
 
 -spec async_execute_prepare(client(), prepared_statement(), params(), callback()) -> ok.
 async_execute_prepare(Client, Statement, Params, ResultCallback) ->

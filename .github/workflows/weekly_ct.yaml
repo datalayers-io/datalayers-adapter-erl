@@ -1,0 +1,43 @@
+name: Weekly CT
+
+on:
+  schedule:
+    - cron: '0 4 * * 1' # Every Monday at 04:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  weekly_ct:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup Erlang
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: '27.2.3'
+          rebar3-version: '3.24.0'
+
+      - name: Start Datalayers Container
+        run: |
+          docker compose -f .ci/docker-compose-file/docker-compose-datalayers.yaml up -d
+          echo \
+            "export DATALAYERS_TCP_ADDR=$(docker container inspect datalayers_tcp -f \
+              '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}') \
+                    DATALAYERS_TLS_ADDR=$(docker container inspect datalayers_tls -f \
+              '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}') \
+            " \
+            | tee -a env.sh
+
+      - name: Run Common Test
+        run: |
+          source env.sh
+          make ct

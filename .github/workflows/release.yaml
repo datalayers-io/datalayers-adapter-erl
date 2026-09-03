@@ -33,12 +33,17 @@ jobs:
         os:
           - macos-14
           - macos-15
+          - macos-26
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: emqx/macos-erlang@f744c98139c0db83a10619587d4bae4fc49765a8 # v1.0.0
+      - uses: emqx/macos-erlang@1e65a0125f99969fd5623999fe52e49f4fa542d5 # v1.2.0
         with:
           otp-version: ${{ matrix.otp }}
+          rebar3-base-url: https://github.com/erlang/rebar3
           rebar3-version: ${{ matrix.rebar3 }}
+
+      - name: add rebar3 to PATH
+        run: echo "$HOME/.kerl/installations/${{ matrix.otp }}/.cache/rebar3/bin" >> "$GITHUB_PATH"
 
       - uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4.1.6
         with:

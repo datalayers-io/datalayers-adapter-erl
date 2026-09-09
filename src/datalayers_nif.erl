@@ -10,7 +10,11 @@
     execute_prepare/3,
     close_prepared/2,
 
-    stop/1
+    stop/1,
+
+    async_execute/4,
+    async_prepare/5,
+    async_execute_prepare/5
 ]).
 
 -export([init/0]).
@@ -48,6 +52,15 @@ close_prepared(_Client, _Statement) ->
     not_loaded(?LINE).
 
 stop(_Client) ->
+    not_loaded(?LINE).
+
+async_execute(_Client, _ReplyPid, _Id, _Sql) ->
+    not_loaded(?LINE).
+
+async_prepare(_Client, _ReplyPid, _Id, _Sql, _AutoRebuild) ->
+    not_loaded(?LINE).
+
+async_execute_prepare(_Client, _ReplyPid, _Id, _Statement, _Params) ->
     not_loaded(?LINE).
 
 %% =================================================================================================

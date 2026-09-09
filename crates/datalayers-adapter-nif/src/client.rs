@@ -10,6 +10,37 @@ use arrow_flight::{
 
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 
+/// Per-stage timeout applied to every blocking flight operation.
+///
+/// Without this, a half-open TCP connection makes `RT.block_on(...)` hang
+/// forever: the calling dirty-io scheduler thread is blocked, the Erlang async
+/// callback never fires and the buffer worker's inflight window is never
+/// reclaimed.
+///
+/// Defaults to 15s. Override with `DL_NIF_TIMEOUT_SECS`; `0` or an invalid
+/// value falls back to the default.
+fn op_timeout() -> Duration {
+    std::env::var("DL_NIF_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(15))
+}
+
+async fn timed<T, E, F>(stage: &str, fut: F) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    let limit = op_timeout();
+    match tokio::time::timeout(limit, fut).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(err)) => Err(anyhow::anyhow!("[{stage}] {err}")),
+        Err(_) => Err(anyhow::anyhow!("[{stage}] timed out after {limit:?}")),
+    }
+}
+
 pub struct Client {
     /// The Arrow Flight SQL client.
     inner: FlightSqlServiceClient<Channel>,
@@ -36,19 +67,20 @@ impl Client {
                 .context("failed to configure TLS")?;
         }
 
-        let channel = endpoint
-            .connect()
+        let channel = timed("connect:tcp", endpoint.connect())
             .await
             .context(format!("Failed to connect to server with uri {uri}"))?;
         let mut flight_sql_client = FlightSqlServiceClient::new(channel);
 
         // Performs authorization with the Datalayers server.
-        let _ = flight_sql_client
-            .handshake(
+        let _ = timed(
+            "connect:handshake",
+            flight_sql_client.handshake(
                 &opts.username.clone().unwrap_or_default(),
                 &opts.password.clone().unwrap_or_default(),
-            )
-            .await?;
+            ),
+        )
+        .await?;
 
         Ok(Self {
             inner: flight_sql_client,
@@ -60,7 +92,8 @@ impl Client {
     }
 
     pub async fn execute(&mut self, sql: &str) -> Result<Vec<RecordBatch>> {
-        let flight_info = self.inner.execute(sql.to_string(), None).await?;
+        let flight_info =
+            timed("execute:flight", self.inner.execute(sql.to_string(), None)).await?;
         let ticket = flight_info
             .endpoint
             .first()
@@ -68,12 +101,12 @@ impl Client {
             .ticket
             .clone()
             .context("No ticket in endpoint")?;
-        let batches = self.do_get(ticket).await?;
+        let batches = timed("execute:do_get", self.do_get(ticket)).await?;
         Ok(batches)
     }
 
     pub async fn prepare(&mut self, sql: &str) -> Result<PreparedStatement<Channel>> {
-        let prepared_stmt = self.inner.prepare(sql.to_string(), None).await?;
+        let prepared_stmt = timed("prepare", self.inner.prepare(sql.to_string(), None)).await?;
         Ok(prepared_stmt)
     }
 
@@ -85,7 +118,7 @@ impl Client {
         prepared_stmt
             .set_parameters(binding)
             .context("Failed to bind a record batch to the prepared statement")?;
-        let flight_info = prepared_stmt.execute().await?;
+        let flight_info = timed("execute_prepared:flight", prepared_stmt.execute()).await?;
         let ticket = flight_info
             .endpoint
             .first()
@@ -93,13 +126,12 @@ impl Client {
             .ticket
             .clone()
             .context("No ticket in endpoint")?;
-        let batches = self.do_get(ticket).await?;
+        let batches = timed("execute_prepared:do_get", self.do_get(ticket)).await?;
         Ok(batches)
     }
 
     pub async fn close_prepared(&self, prepared_stmt: PreparedStatement<Channel>) -> Result<()> {
-        prepared_stmt
-            .close()
+        timed("close_prepared", prepared_stmt.close())
             .await
             .context("Failed to close a prepared statement")
     }

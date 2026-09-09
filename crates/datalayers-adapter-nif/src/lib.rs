@@ -13,6 +13,8 @@ use atoms::*;
 use client::Client;
 use client_opts::ClientOpts;
 use lazy_static::lazy_static;
+use rustler::env::OwnedEnv;
+use rustler::types::LocalPid;
 use rustler::{Encoder, Env, NifResult, Reference, ResourceArc, Term};
 use tokio::runtime::Runtime;
 
@@ -299,4 +301,199 @@ fn stop(client_resource_ref: Reference) -> rustler::Atom {
     }
 
     ok()
+}
+
+// =============================================================================
+// Asynchronous NIFs
+//
+// The submit call returns immediately; the actual flight round-trip runs on a
+// background thread. When it finishes (or hits the per-stage timeout) the
+// result is delivered to the calling Erlang process as:
+//
+//     {datalayers_async_result, Id, Result}
+//
+// where `Result` is `{ok, Value}` or `{error, Reason}`. `datalayers_sock`
+// keeps at most one operation in flight per connection and matches on `Id`.
+// =============================================================================
+
+/// Outcome computed on the background thread and encoded back on that thread.
+enum AsyncPayload {
+    Rows(Vec<Vec<String>>),
+    Prepared(ResourceArc<PreparedStatementResource>),
+    Error(String),
+}
+
+impl AsyncPayload {
+    fn encode<'a>(self, env: Env<'a>) -> Term<'a> {
+        match self {
+            AsyncPayload::Rows(rows) => (ok(), rows).encode(env),
+            AsyncPayload::Prepared(resource) => (ok(), resource).encode(env),
+            AsyncPayload::Error(reason) => (error(), reason).encode(env),
+        }
+    }
+}
+
+/// Run `work` on a background thread and deliver the result to `reply_pid`.
+fn spawn_and_reply<F>(reply_pid: LocalPid, id: i64, work: F)
+where
+    F: FnOnce() -> AsyncPayload + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let payload = work();
+        let mut env = OwnedEnv::new();
+        let _ = env.send_and_clear(&reply_pid, |env| {
+            (datalayers_async_result(), id, payload.encode(env)).encode(env)
+        });
+    });
+}
+
+#[rustler::nif]
+fn async_execute<'a>(
+    env: Env<'a>,
+    client_resource_ref: Reference<'a>,
+    reply_pid: LocalPid,
+    id: i64,
+    sql: String,
+) -> NifResult<Term<'a>> {
+    let client_resource: ResourceArc<ClientResource> = match client_resource_ref.decode() {
+        Ok(r) => r,
+        Err(_) => return Ok((error(), "invalid_client_resource").encode(env)),
+    };
+
+    spawn_and_reply(reply_pid, id, move || {
+        let mut client_guard = match client_resource.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => return AsyncPayload::Error(format!("lock poisoned: {poisoned}")),
+        };
+        match &mut *client_guard {
+            Some(client) => match RT.block_on(client.execute(&sql)) {
+                Ok(batches) => AsyncPayload::Rows(util::record_batch_to_term(&batches[..])),
+                Err(e) => AsyncPayload::Error(e.to_string()),
+            },
+            None => AsyncPayload::Error("client_stopped".to_string()),
+        }
+    });
+
+    Ok(ok().encode(env))
+}
+
+#[rustler::nif]
+fn async_prepare<'a>(
+    env: Env<'a>,
+    client_resource_ref: Reference<'a>,
+    reply_pid: LocalPid,
+    id: i64,
+    sql: String,
+    auto_rebuild: bool,
+) -> NifResult<Term<'a>> {
+    let client_resource: ResourceArc<ClientResource> = match client_resource_ref.decode() {
+        Ok(r) => r,
+        Err(_) => return Ok((error(), "invalid_client_resource").encode(env)),
+    };
+
+    spawn_and_reply(reply_pid, id, move || {
+        let mut client_guard = match client_resource.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => return AsyncPayload::Error(format!("lock poisoned: {poisoned}")),
+        };
+        match &mut *client_guard {
+            Some(client) => match RT.block_on(client.prepare(&sql)) {
+                Ok(statement) => AsyncPayload::Prepared(PreparedStatementResource::new(
+                    statement,
+                    sql,
+                    auto_rebuild,
+                )),
+                Err(e) => AsyncPayload::Error(e.to_string()),
+            },
+            None => AsyncPayload::Error("client_stopped".to_string()),
+        }
+    });
+
+    Ok(ok().encode(env))
+}
+
+#[rustler::nif]
+fn async_execute_prepare<'a>(
+    env: Env<'a>,
+    client_resource_ref: Reference<'a>,
+    reply_pid: LocalPid,
+    id: i64,
+    statement_resource_ref: Reference<'a>,
+    params: Term<'a>,
+) -> NifResult<Term<'a>> {
+    let client_resource: ResourceArc<ClientResource> = match client_resource_ref.decode() {
+        Ok(r) => r,
+        Err(_) => return Ok((error(), "invalid_client_resource").encode(env)),
+    };
+    let statement_resource: ResourceArc<PreparedStatementResource> =
+        match statement_resource_ref.decode() {
+            Ok(r) => r,
+            Err(_) => return Ok((error(), "invalid_statement_resource").encode(env)),
+        };
+
+    // Parameters are Erlang terms, so the binding must be built on the calling
+    // thread; the resulting `RecordBatch` is owned data and can be moved to the
+    // worker thread.
+    let binding = {
+        let statement_guard = match statement_resource.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                return Ok((error(), format!("statement lock poisoned: {poisoned}")).encode(env));
+            }
+        };
+        let Some(statement) = &*statement_guard else {
+            return Ok((error(), "client_or_statement_stopped").encode(env));
+        };
+        match util::params_to_record_batch(statement, params) {
+            Ok(binding) => binding,
+            Err(rustler::Error::BadArg) => return Ok((error(), "badarg").encode(env)),
+            Err(e) => return Ok((error(), format!("invalid_params: {e:?}")).encode(env)),
+        }
+    };
+
+    spawn_and_reply(reply_pid, id, move || {
+        let mut client_guard = match client_resource.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                return AsyncPayload::Error(format!("client lock poisoned: {poisoned}"));
+            }
+        };
+        let Some(client) = &mut *client_guard else {
+            return AsyncPayload::Error("client_or_statement_stopped".to_string());
+        };
+        let mut statement_guard = match statement_resource.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                return AsyncPayload::Error(format!("statement lock poisoned: {poisoned}"));
+            }
+        };
+        let Some(statement) = &mut *statement_guard else {
+            return AsyncPayload::Error("client_or_statement_stopped".to_string());
+        };
+
+        match RT.block_on(client.execute_prepared(statement, binding.clone())) {
+            Ok(batches) => AsyncPayload::Rows(util::record_batch_to_term(&batches[..])),
+            Err(e) => {
+                if statement_resource.auto_rebuild && is_prepared_statement_lost(&e) {
+                    match RT.block_on(client.prepare(&statement_resource.sql)) {
+                        Ok(mut new_statement) => {
+                            match RT.block_on(client.execute_prepared(&mut new_statement, binding))
+                            {
+                                Ok(batches) => {
+                                    *statement = new_statement;
+                                    AsyncPayload::Rows(util::record_batch_to_term(&batches[..]))
+                                }
+                                Err(e2) => AsyncPayload::Error(e2.to_string()),
+                            }
+                        }
+                        Err(rebuild_err) => AsyncPayload::Error(rebuild_err.to_string()),
+                    }
+                } else {
+                    AsyncPayload::Error(e.to_string())
+                }
+            }
+        }
+    });
+
+    Ok(ok().encode(env))
 }

@@ -97,20 +97,20 @@ stop(Client) ->
 %% ================================================================================
 %% Asynchronous APIs
 
--spec async_execute(client(), sql(), callback()) -> ok.
+-spec async_execute(client(), sql(), callback()) -> {ok, client()}.
 async_execute(Client, Sql, ResultCallback) ->
     ?async(Client, [Sql], ResultCallback).
 
--spec async_prepare(client(), sql(), callback()) -> ok.
+-spec async_prepare(client(), sql(), callback()) -> {ok, client()}.
 async_prepare(Client, Sql, ResultCallback) ->
     async_prepare(Client, Sql, #{auto_rebuild => false}, ResultCallback).
 
--spec async_prepare(client(), sql(), prepare_opts(), callback()) -> ok.
+-spec async_prepare(client(), sql(), prepare_opts(), callback()) -> {ok, client()}.
 async_prepare(Client, Sql, Opts, ResultCallback) ->
     AutoRebuild = maps:get(auto_rebuild, Opts, false),
     ?async(Client, [Sql, AutoRebuild], ResultCallback).
 
--spec async_execute_prepare(client(), prepared_statement(), params(), callback()) -> ok.
+-spec async_execute_prepare(client(), prepared_statement(), params(), callback()) -> {ok, client()}.
 async_execute_prepare(Client, Statement, Params, ResultCallback) ->
     ?async(Client, [Statement, Params], ResultCallback).
 
@@ -123,10 +123,12 @@ call(Client, _Fun = Cmd, Args) ->
         {error, _Reason} = Err -> Err
     end.
 
--spec async(client(), command(), list(), callback()) -> ok.
+-spec async(client(), command(), list(), callback()) -> {ok, client()}.
 async(Client, _Fun = Cmd, Args, ResultCallback) ->
     _ = erlang:send(Client, ?ASYNC_REQ(Cmd, Args, ResultCallback)),
-    ok.
+    %% Returning the socket pid lets the caller (emqx_resource_buffer_worker)
+    %% monitor it, so inflight entries become retriable if the socket dies.
+    {ok, Client}.
 
 with_out_async(Func) ->
     Raw = atom_to_binary(Func, utf8),

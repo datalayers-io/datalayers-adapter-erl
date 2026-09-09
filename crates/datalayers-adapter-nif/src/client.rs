@@ -19,13 +19,16 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 ///
 /// Defaults to 15s. Override with `DL_NIF_TIMEOUT_SECS`; `0` or an invalid
 /// value falls back to the default.
-fn op_timeout() -> Duration {
-    std::env::var("DL_NIF_TIMEOUT_SECS")
-        .ok()
+fn timeout_from_str(value: Option<&str>) -> Duration {
+    value
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|secs| *secs > 0)
         .map(Duration::from_secs)
         .unwrap_or(Duration::from_secs(15))
+}
+
+fn op_timeout() -> Duration {
+    timeout_from_str(std::env::var("DL_NIF_TIMEOUT_SECS").ok().as_deref())
 }
 
 async fn timed<T, E, F>(stage: &str, fut: F) -> Result<T>
@@ -33,7 +36,14 @@ where
     F: std::future::Future<Output = Result<T, E>>,
     E: std::fmt::Display,
 {
-    let limit = op_timeout();
+    timed_with(op_timeout(), stage, fut).await
+}
+
+async fn timed_with<T, E, F>(limit: Duration, stage: &str, fut: F) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
     match tokio::time::timeout(limit, fut).await {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(err)) => Err(anyhow::anyhow!("[{stage}] {err}")),
@@ -147,5 +157,55 @@ impl Client {
         let stream = self.inner.do_get(ticket).await?;
         let batches = stream.try_collect::<Vec<_>>().await?;
         Ok(batches)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{timed_with, timeout_from_str};
+    use std::time::Duration;
+
+    #[test]
+    fn timeout_defaults_to_15s() {
+        assert_eq!(timeout_from_str(None), Duration::from_secs(15));
+        assert_eq!(timeout_from_str(Some("")), Duration::from_secs(15));
+        assert_eq!(timeout_from_str(Some("0")), Duration::from_secs(15));
+        assert_eq!(timeout_from_str(Some("nope")), Duration::from_secs(15));
+    }
+
+    #[test]
+    fn timeout_reads_env_value() {
+        assert_eq!(timeout_from_str(Some("30")), Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn timed_returns_value() {
+        let out = timed_with(Duration::from_secs(5), "t", async {
+            Ok::<_, std::io::Error>(42)
+        })
+        .await;
+        assert_eq!(out.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn timed_propagates_error() {
+        let out = timed_with(Duration::from_secs(5), "t", async {
+            Err::<i32, _>(std::io::Error::other("boom"))
+        })
+        .await;
+        let msg = out.unwrap_err().to_string();
+        assert!(msg.contains("[t]") && msg.contains("boom"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn timed_returns_error_on_timeout() {
+        let out = timed_with(
+            Duration::from_millis(10),
+            "execute:flight",
+            std::future::pending::<Result<i32, std::io::Error>>(),
+        )
+        .await;
+        let msg = out.unwrap_err().to_string();
+        assert!(msg.contains("timed out after"), "{msg}");
     }
 }

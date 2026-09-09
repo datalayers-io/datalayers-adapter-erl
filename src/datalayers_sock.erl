@@ -84,6 +84,11 @@ handle_call(?REQ(Func, Args), _From, State = ?client_ref(ClientRef)) ->
 handle_info(?ASYNC_REQ(Func, Args, Callback), State) ->
     case State#state.client of
         ClientRef when is_reference(ClientRef) ->
+            %% Correlation id 用整型而不是 make_ref()：它要一路传进 Rust NIF，
+            %% 并在后台线程的 OwnedEnv 里重新编码回完成消息。整数可直接 decode
+            %% 成 i64 再 encode；Reference 是 env 绑定的 term，跨 env 需要
+            %% OwnedEnv::save/load 额外拷一份。unique_integer/1 节点内单调唯一、
+            %% 绝不复用，作为关联键同样安全且更省一次 env 拷贝。
             Id = erlang:unique_integer([monotonic, positive]),
             Pending = maps:put(Id, Callback, State#state.pending),
             Queue = queue:in({Id, Func, Args}, State#state.queue),

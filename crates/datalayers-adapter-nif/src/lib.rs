@@ -497,3 +497,32 @@ fn async_execute_prepare<'a>(
 
     Ok(ok().encode(env))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::is_prepared_statement_lost;
+
+    #[test]
+    fn not_found_is_lost() {
+        let err = anyhow::Error::new(tonic::Status::not_found("gone"));
+        assert!(is_prepared_statement_lost(&err));
+    }
+
+    #[test]
+    fn other_status_is_not_lost() {
+        let err = anyhow::Error::new(tonic::Status::internal("boom"));
+        assert!(!is_prepared_statement_lost(&err));
+    }
+
+    #[test]
+    fn plain_error_is_not_lost() {
+        let err = anyhow::anyhow!("plain");
+        assert!(!is_prepared_statement_lost(&err));
+    }
+
+    #[test]
+    fn wrapped_not_found_is_lost() {
+        let err = anyhow::Error::new(tonic::Status::not_found("gone")).context("outer");
+        assert!(is_prepared_statement_lost(&err));
+    }
+}

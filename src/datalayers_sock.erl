@@ -12,8 +12,12 @@
     current = undefined :: integer() | undefined,
     %% id => callback, for queued and in-flight async requests
     pending = #{} :: #{integer() => callback()},
-    %% async requests waiting to be dispatched
-    queue = queue:new() :: queue:queue({integer(), command(), args()})
+    %% requests waiting to be dispatched: {async, Id, Func, Args} runs on the NIF
+    %% worker, {sync, From, Func, Args} runs in this process.  Both kinds share the
+    %% queue so that one socket preserves the order of sync and async requests.
+    queue = queue:new() :: queue:queue(
+        {async, integer(), command(), args()} | {sync, gen_server:from(), command(), args()}
+    )
 }).
 
 -define(client_ref(Ref), #state{client = Ref}).
@@ -74,24 +78,29 @@ handle_call(_, _From, State = ?client_ref(ClientRef)) when
     not is_reference(ClientRef)
 ->
     {reply, {error, not_connected}, State};
-handle_call(?REQ(Func, Args), _From, State = ?client_ref(ClientRef)) ->
-    case apply_nif(Func, [ClientRef | Args]) of
-        ?is_ok = Ok -> {reply, Ok, State};
-        ?is_err = Err -> {reply, Err, State}
-    end.
+handle_call(?REQ(Func, Args), From, State = ?client_ref(ClientRef)) when
+    is_reference(ClientRef)
+->
+    %% One socket serves both synchronous and asynchronous requests, so a sync
+    %% request is queued as well: it must not overtake the requests that are already
+    %% queued or in flight on this connection.
+    Queue = queue:in({sync, From, Func, Args}, State#state.queue),
+    {noreply, maybe_dispatch(State#state{queue = Queue})}.
 
 %% handle_info({async, ...}) -- enqueue and dispatch at most one at a time.
 handle_info(?ASYNC_REQ(Func, Args, Callback), State) ->
     case State#state.client of
         ClientRef when is_reference(ClientRef) ->
-            %% Correlation id 用整型而不是 make_ref()：它要一路传进 Rust NIF，
-            %% 并在后台线程的 OwnedEnv 里重新编码回完成消息。整数可直接 decode
-            %% 成 i64 再 encode；Reference 是 env 绑定的 term，跨 env 需要
-            %% OwnedEnv::save/load 额外拷一份。unique_integer/1 节点内单调唯一、
-            %% 绝不复用，作为关联键同样安全且更省一次 env 拷贝。
+            %% The correlation id is an integer rather than a make_ref(): it is passed
+            %% into the Rust NIF and re-encoded into the completion message from a
+            %% different environment (the worker's OwnedEnv).  An integer decodes and
+            %% encodes as i64 directly, while a Reference is bound to its environment
+            %% and would need an extra OwnedEnv::save/load copy.  `unique_integer/1` is
+            %% monotonically unique per node and never reused, so it is just as safe as
+            %% a reference as a correlation key.
             Id = erlang:unique_integer([monotonic, positive]),
             Pending = maps:put(Id, Callback, State#state.pending),
-            Queue = queue:in({Id, Func, Args}, State#state.queue),
+            Queue = queue:in({async, Id, Func, Args}, State#state.queue),
             {noreply, maybe_dispatch(State#state{pending = Pending, queue = Queue})};
         _ ->
             reply_callback(Callback, {error, not_connected}),
@@ -121,7 +130,10 @@ handle_cast(stop, State = ?client_ref(undefined)) ->
     {stop, normal, State};
 handle_cast(stop, State = ?client_ref(ClientRef)) ->
     _ = datalayers_nif:stop(ClientRef),
-    {stop, normal, State#state{client = undefined}}.
+    %% Answer queued synchronous callers before stopping, otherwise they would wait
+    %% forever on `gen_server:call(..., infinity)`.
+    ok = reply_pending_sync(State#state.queue),
+    {stop, normal, State#state{client = undefined, queue = queue:new()}}.
 
 %% ================================================================================
 %% Helpers
@@ -130,7 +142,7 @@ maybe_dispatch(State = #state{current = undefined, queue = Queue, client = Clien
     is_reference(ClientRef)
 ->
     case queue:out(Queue) of
-        {{value, {Id, Func, Args}}, Queue1} ->
+        {{value, {async, Id, Func, Args}}, Queue1} ->
             State1 = State#state{queue = Queue1, current = Id},
             case apply_async_nif(Func, [ClientRef | Args], Id) of
                 ok ->
@@ -141,11 +153,29 @@ maybe_dispatch(State = #state{current = undefined, queue = Queue, client = Clien
                     reply_callback(Callback, {error, Reason}),
                     maybe_dispatch(State1#state{current = undefined, pending = Pending})
             end;
+        {{value, {sync, From, Func, Args}}, Queue1} ->
+            %% Runs in this process; the shared queue is what keeps it ordered with
+            %% the asynchronous requests on the same connection.
+            Result = apply_nif(Func, [ClientRef | Args]),
+            _ = gen_server:reply(From, Result),
+            maybe_dispatch(State#state{queue = Queue1});
         {empty, _} ->
             State
     end;
 maybe_dispatch(State) ->
     State.
+
+reply_pending_sync(Queue) ->
+    case queue:out(Queue) of
+        {{value, {sync, From, _Func, _Args}}, Queue1} ->
+            _ = gen_server:reply(From, {error, stopped}),
+            reply_pending_sync(Queue1);
+        {{value, {async, _Id, _Func, _Args}}, Queue1} ->
+            %% Async callers are released by the socket monitor on the caller side.
+            reply_pending_sync(Queue1);
+        {empty, _} ->
+            ok
+    end.
 
 apply_async_nif(execute, [ClientRef, Sql], Id) ->
     ?NIF_MODULE:async_execute(ClientRef, self(), Id, Sql);

@@ -333,6 +333,25 @@ impl AsyncPayload {
     }
 }
 
+/// Build the Arrow binding for `statement` from parameters saved in `owned_env`.
+///
+/// This runs on the worker thread: converting the parameter matrix scales with
+/// the input size, so it must not happen on a normal BEAM scheduler.
+fn binding_from_saved(
+    owned_env: &OwnedEnv,
+    saved_params: &rustler::env::SavedTerm,
+    statement: &arrow_flight::sql::client::PreparedStatement<tonic::transport::Channel>,
+) -> Result<arrow_array::RecordBatch, AsyncPayload> {
+    owned_env.run(|env| {
+        let params = saved_params.load(env);
+        match util::params_to_record_batch(statement, params) {
+            Ok(binding) => Ok(binding),
+            Err(rustler::Error::BadArg) => Err(AsyncPayload::Error("badarg".to_string())),
+            Err(e) => Err(AsyncPayload::Error(format!("invalid_params: {e:?}"))),
+        }
+    })
+}
+
 /// Run `work` on the runtime's blocking pool and deliver the result to `reply_pid`.
 ///
 /// `work` blocks (it drives the flight future with `Runtime::block_on`), so it
@@ -437,25 +456,12 @@ fn async_execute_prepare<'a>(
             Err(_) => return Ok((error(), "invalid_statement_resource").encode(env)),
         };
 
-    // Parameters are Erlang terms, so the binding must be built on the calling
-    // thread; the resulting `RecordBatch` is owned data and can be moved to the
-    // worker thread.
-    let binding = {
-        let statement_guard = match statement_resource.inner.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                return Ok((error(), format!("statement lock poisoned: {poisoned}")).encode(env));
-            }
-        };
-        let Some(statement) = &*statement_guard else {
-            return Ok((error(), "client_or_statement_stopped").encode(env));
-        };
-        match util::params_to_record_batch(statement, params) {
-            Ok(binding) => binding,
-            Err(rustler::Error::BadArg) => return Ok((error(), "badarg").encode(env)),
-            Err(e) => return Ok((error(), format!("invalid_params: {e:?}")).encode(env)),
-        }
-    };
+    // Only the term copy happens on the BEAM scheduler. Locking the resources and
+    // converting the parameter matrix into an Arrow `RecordBatch` both scale with
+    // the input size, so they happen on the worker thread; the parameters travel
+    // there through an owned environment.
+    let owned_env = OwnedEnv::new();
+    let saved_params = owned_env.save(params);
 
     spawn_and_reply(reply_pid, id, move || {
         let mut client_guard = match client_resource.inner.lock() {
@@ -473,8 +479,28 @@ fn async_execute_prepare<'a>(
                 return AsyncPayload::Error(format!("statement lock poisoned: {poisoned}"));
             }
         };
+
+        // `close_prepared/1` takes the statement out of the resource; rebuild it when
+        // the caller asked for auto_rebuild, exactly like the synchronous path does.
+        if statement_guard.is_none() {
+            if !statement_resource.auto_rebuild {
+                return AsyncPayload::Error("client_or_statement_stopped".to_string());
+            }
+            return rebuild_and_execute(
+                client,
+                &statement_resource.sql,
+                &mut statement_guard,
+                &owned_env,
+                &saved_params,
+            );
+        }
         let Some(statement) = &mut *statement_guard else {
             return AsyncPayload::Error("client_or_statement_stopped".to_string());
+        };
+
+        let binding = match binding_from_saved(&owned_env, &saved_params, statement) {
+            Ok(binding) => binding,
+            Err(err) => return err,
         };
 
         match RT.block_on(client.execute_prepared(statement, binding.clone())) {
@@ -483,7 +509,14 @@ fn async_execute_prepare<'a>(
                 if statement_resource.auto_rebuild && is_prepared_statement_lost(&e) {
                     match RT.block_on(client.prepare(&statement_resource.sql)) {
                         Ok(mut new_statement) => {
-                            match RT.block_on(client.execute_prepared(&mut new_statement, binding))
+                            let new_binding =
+                                match binding_from_saved(&owned_env, &saved_params, &new_statement)
+                                {
+                                    Ok(binding) => binding,
+                                    Err(err) => return err,
+                                };
+                            match RT
+                                .block_on(client.execute_prepared(&mut new_statement, new_binding))
                             {
                                 Ok(batches) => {
                                     *statement = new_statement;
@@ -502,6 +535,36 @@ fn async_execute_prepare<'a>(
     });
 
     Ok(ok().encode(env))
+}
+
+/// Rebuild a prepared statement that is gone locally or was lost by the server,
+/// execute it, and store the new handle back into the resource.
+fn rebuild_and_execute(
+    client: &mut Client,
+    sql: &str,
+    statement_guard: &mut std::sync::MutexGuard<
+        '_,
+        Option<arrow_flight::sql::client::PreparedStatement<tonic::transport::Channel>>,
+    >,
+    owned_env: &OwnedEnv,
+    saved_params: &rustler::env::SavedTerm,
+) -> AsyncPayload {
+    match RT.block_on(client.prepare(sql)) {
+        Ok(mut new_statement) => {
+            let binding = match binding_from_saved(owned_env, saved_params, &new_statement) {
+                Ok(binding) => binding,
+                Err(err) => return err,
+            };
+            match RT.block_on(client.execute_prepared(&mut new_statement, binding)) {
+                Ok(batches) => {
+                    **statement_guard = Some(new_statement);
+                    AsyncPayload::Rows(util::record_batch_to_term(&batches[..]))
+                }
+                Err(e2) => AsyncPayload::Error(format!("{e2:#}")),
+            }
+        }
+        Err(rebuild_err) => AsyncPayload::Error(format!("{rebuild_err:#}")),
+    }
 }
 
 #[cfg(test)]

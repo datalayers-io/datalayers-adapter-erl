@@ -59,7 +59,14 @@ groups() ->
         t_prepare_with_null_test,
         t_empty_batch,
         t_prepare_auto_rebuild_test,
-        t_prepare_no_rebuild_test
+        t_prepare_no_rebuild_test,
+        t_async_execute,
+        t_async_prepare,
+        t_async_execute_prepare,
+        t_async_ordering,
+        t_async_error_reply,
+        t_async_prepare_auto_rebuild,
+        t_sync_after_async_ordering
     ],
     [
         {tcp, TCs},
@@ -299,6 +306,131 @@ t_prepare_no_rebuild_test(Config) ->
     ),
     ok = datalayers:stop(Client).
 
+t_async_execute(Config) ->
+    {ok, Client} = datalayers:connect(?conn_opts(Config)),
+    Parent = self(),
+    {ok, _} = datalayers:async_execute(Client, <<"SELECT version()">>, async_reply_fun(Parent)),
+    {ok, [[Vsn]]} = receive_async_result(5000),
+    ?assertEqual(?version(Config), Vsn),
+    ok = datalayers:stop(Client).
+
+t_async_prepare(Config) ->
+    {ok, Client} = datalayers:connect(?conn_opts(Config)),
+    Parent = self(),
+    {ok, _} = datalayers:async_prepare(
+        Client, ?insert_prepare_sql_statement(Config), async_reply_fun(Parent)
+    ),
+    %% Exercises the ResourceArc -> Erlang term encoding on the NIF worker thread.
+    {ok, PreparedStatement} = receive_async_result(5000),
+    Timestamp = erlang:system_time(millisecond),
+    {ok, _} = datalayers:execute_prepare(Client, PreparedStatement, [[Timestamp, 1, 42.0, 1]]),
+    ?assertMatch(
+        {ok, [[_, <<"1">>, <<"42.0">>, <<"1">>]]},
+        do_execute(Client, ?select_all_from_table_by_ts(Config, Timestamp))
+    ),
+    {ok, _} = datalayers:close_prepared(Client, PreparedStatement),
+    ok = datalayers:stop(Client).
+
+t_async_execute_prepare(Config) ->
+    {ok, Client} = datalayers:connect(?conn_opts(Config)),
+    {ok, PreparedStatement} = datalayers:prepare(
+        Client, ?insert_prepare_sql_statement(Config)
+    ),
+    Parent = self(),
+    Timestamp = erlang:system_time(millisecond),
+    {ok, _} = datalayers:async_execute_prepare(
+        Client,
+        PreparedStatement,
+        [[Timestamp, 1, 42.0, 1]],
+        async_reply_fun(Parent)
+    ),
+    {ok, _} = receive_async_result(5000),
+    ?assertMatch(
+        {ok, [[_, <<"1">>, <<"42.0">>, <<"1">>]]},
+        do_execute(Client, ?select_all_from_table_by_ts(Config, Timestamp))
+    ),
+    {ok, _} = datalayers:close_prepared(Client, PreparedStatement),
+    ok = datalayers:stop(Client).
+
+t_async_ordering(Config) ->
+    {ok, Client} = datalayers:connect(?conn_opts(Config)),
+    Parent = self(),
+    Numbers = lists:seq(1, 20),
+    Sqls = [integer_to_binary(N) || N <- Numbers],
+    lists:foreach(
+        fun(N) ->
+            {ok, _} = datalayers:async_execute(
+                Client, <<"SELECT ", N/binary>>, async_reply_fun(Parent)
+            )
+        end,
+        Sqls
+    ),
+    %% single in-flight per connection must preserve request order
+    Results = [receive_async_result(5000) || _ <- Numbers],
+    Expected = [{ok, [[N]]} || N <- Sqls],
+    ?assertEqual(Expected, Results),
+    ok = datalayers:stop(Client).
+
+t_async_error_reply(Config) ->
+    {ok, Client} = datalayers:connect(?conn_opts(Config)),
+    Parent = self(),
+    {ok, _} = datalayers:async_execute(
+        Client,
+        <<"SELECT * FROM no_such_db.no_such_table">>,
+        async_reply_fun(Parent)
+    ),
+    %% a failing request must still reply, never leave the caller hanging
+    ?assertMatch({error, _}, receive_async_result(5000)),
+    ok = datalayers:stop(Client).
+
+t_async_prepare_auto_rebuild(Config) ->
+    {ok, Client} = datalayers:connect(?conn_opts(Config)),
+    Parent = self(),
+    {ok, PreparedStatement} = datalayers:prepare(
+        Client, ?insert_prepare_sql_statement(Config), #{auto_rebuild => true}
+    ),
+    Timestamp = erlang:system_time(millisecond),
+    {ok, _} = datalayers:execute_prepare(Client, PreparedStatement, [[Timestamp, 1, 42.0, 1]]),
+    %% Closing the handle takes the statement out of the resource; the asynchronous
+    %% path must rebuild it because auto_rebuild is set.
+    {ok, _} = datalayers:close_prepared(Client, PreparedStatement),
+    Timestamp2 = erlang:system_time(millisecond),
+    {ok, _} = datalayers:async_execute_prepare(
+        Client,
+        PreparedStatement,
+        [[Timestamp2, 2, 43.0, 0]],
+        async_reply_fun(Parent)
+    ),
+    ?assertMatch({ok, _}, receive_async_result(5000)),
+    ?assertMatch(
+        {ok, [[_, <<"2">>, <<"43.0">>, <<"0">>]]},
+        do_execute(Client, ?select_all_from_table_by_ts(Config, Timestamp2))
+    ),
+    ok = datalayers:stop(Client).
+
+t_sync_after_async_ordering(Config) ->
+    {ok, Client} = datalayers:connect(?conn_opts(Config)),
+    Parent = self(),
+    Numbers = lists:seq(1, 10),
+    Sqls = [integer_to_binary(N) || N <- Numbers],
+    lists:foreach(
+        fun(N) ->
+            {ok, _} = datalayers:async_execute(
+                Client, <<"SELECT ", N/binary>>, async_reply_fun(Parent)
+            )
+        end,
+        Sqls
+    ),
+    %% A synchronous request shares the connection queue, so it must not overtake the
+    %% asynchronous requests that are already queued.  The socket answers the async
+    %% callbacks before it replies to this call, and messages from one sender to one
+    %% receiver are ordered, so every async result is already in our mailbox once the
+    %% synchronous call returns.
+    {ok, [[<<"999">>]]} = datalayers:execute(Client, <<"SELECT 999">>),
+    Results = [receive_async_result(0) || _ <- Numbers],
+    ?assertEqual([{ok, [[N]]} || N <- Sqls], Results),
+    ok = datalayers:stop(Client).
+
 %% ================================================================================
 %% Helpers
 %% ================================================================================
@@ -332,3 +464,16 @@ drop_database_and_table(Config) ->
 
 do_execute(Client, SQL) ->
     {ok, _} = datalayers:execute(Client, SQL).
+
+%% Callback handed to datalayers:async_*; the socket invokes it as
+%% CallbackFun(CallbackArgs ++ [Result]), i.e. async_reply_fun(Parent) yields
+%% fun(Parent, Result) -> Parent ! {async_result, Result} end.
+async_reply_fun(Parent) ->
+    {fun(To, Result) -> To ! {async_result, Result} end, [Parent]}.
+
+receive_async_result(Timeout) ->
+    receive
+        {async_result, Result} -> Result
+    after Timeout ->
+        ct:fail("timed out waiting for async result")
+    end.

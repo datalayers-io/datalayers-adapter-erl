@@ -10,43 +10,32 @@ use arrow_flight::{
 
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 
-/// Per-stage timeout applied to every blocking flight operation.
+/// Run `fut`, bounded by `limit`, tagging any error with the flight stage it came
+/// from.
 ///
-/// Without this, a half-open TCP connection makes `RT.block_on(...)` hang
-/// forever: the calling dirty-io scheduler thread is blocked, the Erlang async
-/// callback never fires and the buffer worker's inflight window is never
-/// reclaimed.
+/// Without a bound, a half-open TCP connection makes `RT.block_on(...)` hang
+/// forever: the calling thread is blocked, the Erlang async callback never fires
+/// and the buffer worker's inflight window is never reclaimed.
 ///
-/// Defaults to 15s. Override with `DL_NIF_TIMEOUT_SECS`; `0` or an invalid
-/// value falls back to the default.
-fn timeout_from_str(value: Option<&str>) -> Duration {
-    value
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|secs| *secs > 0)
-        .map(Duration::from_secs)
-        .unwrap_or(Duration::from_secs(15))
-}
-
-fn op_timeout() -> Duration {
-    timeout_from_str(std::env::var("DL_NIF_TIMEOUT_SECS").ok().as_deref())
-}
-
-async fn timed<T, E, F>(stage: &str, fut: F) -> Result<T>
+/// The limit is always supplied by the caller (`Client` carries the value it was
+/// created with) — there is deliberately no hidden global or environment knob.
+///
+/// The original error is attached as the *source* of the returned error (via
+/// `anyhow::Context`) instead of being formatted into a fresh message: callers
+/// classify failures by inspecting the error chain, e.g.
+/// `is_prepared_statement_lost` looks for a `tonic::Status` with code `NotFound`
+/// to decide whether a prepared statement has to be rebuilt. Turning the error
+/// into a message-only error here would silently disable that classification.
+///
+/// Timeouts have no source, so the two paths differ only in the message.
+async fn timed<T, E, F>(limit: Duration, stage: &str, fut: F) -> Result<T>
 where
     F: std::future::Future<Output = Result<T, E>>,
-    E: std::fmt::Display,
-{
-    timed_with(op_timeout(), stage, fut).await
-}
-
-async fn timed_with<T, E, F>(limit: Duration, stage: &str, fut: F) -> Result<T>
-where
-    F: std::future::Future<Output = Result<T, E>>,
-    E: std::fmt::Display,
+    E: Into<anyhow::Error>,
 {
     match tokio::time::timeout(limit, fut).await {
         Ok(Ok(value)) => Ok(value),
-        Ok(Err(err)) => Err(anyhow::anyhow!("[{stage}] {err}")),
+        Ok(Err(err)) => Err(err.into().context(format!("[{stage}]"))),
         Err(_) => Err(anyhow::anyhow!("[{stage}] timed out after {limit:?}")),
     }
 }
@@ -54,11 +43,14 @@ where
 pub struct Client {
     /// The Arrow Flight SQL client.
     inner: FlightSqlServiceClient<Channel>,
+    /// Per-stage flight timeout, taken from the connect options.
+    timeout: Duration,
 }
 
 impl Client {
     pub async fn try_new(opts: &ClientOpts) -> Result<Self> {
         let uri = opts.format_uri();
+        let timeout = opts.timeout();
         let mut endpoint = Endpoint::from_str(&uri)
             .context(format!("Failed to create an endpoint with uri {uri}"))?
             .connect_timeout(Duration::from_secs(5))
@@ -77,13 +69,14 @@ impl Client {
                 .context("failed to configure TLS")?;
         }
 
-        let channel = timed("connect:tcp", endpoint.connect())
+        let channel = timed(timeout, "connect:tcp", endpoint.connect())
             .await
             .context(format!("Failed to connect to server with uri {uri}"))?;
         let mut flight_sql_client = FlightSqlServiceClient::new(channel);
 
         // Performs authorization with the Datalayers server.
         let _ = timed(
+            timeout,
             "connect:handshake",
             flight_sql_client.handshake(
                 &opts.username.clone().unwrap_or_default(),
@@ -94,6 +87,7 @@ impl Client {
 
         Ok(Self {
             inner: flight_sql_client,
+            timeout,
         })
     }
 
@@ -102,8 +96,12 @@ impl Client {
     }
 
     pub async fn execute(&mut self, sql: &str) -> Result<Vec<RecordBatch>> {
-        let flight_info =
-            timed("execute:flight", self.inner.execute(sql.to_string(), None)).await?;
+        let flight_info = timed(
+            self.timeout,
+            "execute:flight",
+            self.inner.execute(sql.to_string(), None),
+        )
+        .await?;
         let ticket = flight_info
             .endpoint
             .first()
@@ -111,12 +109,17 @@ impl Client {
             .ticket
             .clone()
             .context("No ticket in endpoint")?;
-        let batches = timed("execute:do_get", self.do_get(ticket)).await?;
+        let batches = timed(self.timeout, "execute:do_get", self.do_get(ticket)).await?;
         Ok(batches)
     }
 
     pub async fn prepare(&mut self, sql: &str) -> Result<PreparedStatement<Channel>> {
-        let prepared_stmt = timed("prepare", self.inner.prepare(sql.to_string(), None)).await?;
+        let prepared_stmt = timed(
+            self.timeout,
+            "prepare",
+            self.inner.prepare(sql.to_string(), None),
+        )
+        .await?;
         Ok(prepared_stmt)
     }
 
@@ -128,7 +131,12 @@ impl Client {
         prepared_stmt
             .set_parameters(binding)
             .context("Failed to bind a record batch to the prepared statement")?;
-        let flight_info = timed("execute_prepared:flight", prepared_stmt.execute()).await?;
+        let flight_info = timed(
+            self.timeout,
+            "execute_prepared:flight",
+            prepared_stmt.execute(),
+        )
+        .await?;
         let ticket = flight_info
             .endpoint
             .first()
@@ -136,12 +144,12 @@ impl Client {
             .ticket
             .clone()
             .context("No ticket in endpoint")?;
-        let batches = timed("execute_prepared:do_get", self.do_get(ticket)).await?;
+        let batches = timed(self.timeout, "execute_prepared:do_get", self.do_get(ticket)).await?;
         Ok(batches)
     }
 
     pub async fn close_prepared(&self, prepared_stmt: PreparedStatement<Channel>) -> Result<()> {
-        timed("close_prepared", prepared_stmt.close())
+        timed(self.timeout, "close_prepared", prepared_stmt.close())
             .await
             .context("Failed to close a prepared statement")
     }
@@ -162,25 +170,12 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
-    use super::{timed_with, timeout_from_str};
+    use super::timed;
     use std::time::Duration;
-
-    #[test]
-    fn timeout_defaults_to_15s() {
-        assert_eq!(timeout_from_str(None), Duration::from_secs(15));
-        assert_eq!(timeout_from_str(Some("")), Duration::from_secs(15));
-        assert_eq!(timeout_from_str(Some("0")), Duration::from_secs(15));
-        assert_eq!(timeout_from_str(Some("nope")), Duration::from_secs(15));
-    }
-
-    #[test]
-    fn timeout_reads_env_value() {
-        assert_eq!(timeout_from_str(Some("30")), Duration::from_secs(30));
-    }
 
     #[tokio::test]
     async fn timed_returns_value() {
-        let out = timed_with(Duration::from_secs(5), "t", async {
+        let out = timed(Duration::from_secs(5), "t", async {
             Ok::<_, std::io::Error>(42)
         })
         .await;
@@ -189,23 +184,49 @@ mod tests {
 
     #[tokio::test]
     async fn timed_propagates_error() {
-        let out = timed_with(Duration::from_secs(5), "t", async {
+        let out = timed(Duration::from_secs(5), "t", async {
             Err::<i32, _>(std::io::Error::other("boom"))
         })
         .await;
-        let msg = out.unwrap_err().to_string();
-        assert!(msg.contains("[t]") && msg.contains("boom"), "{msg}");
+        let err = out.unwrap_err();
+        // The stage is the context (`{}`), the cause lives in the chain (`{:#}`).
+        assert_eq!(err.to_string(), "[t]");
+        assert!(format!("{err:#}").contains("boom"), "{err:#}");
     }
 
     #[tokio::test]
     async fn timed_returns_error_on_timeout() {
-        let out = timed_with(
+        let out = timed(
             Duration::from_millis(10),
             "execute:flight",
             std::future::pending::<Result<i32, std::io::Error>>(),
         )
         .await;
-        let msg = out.unwrap_err().to_string();
-        assert!(msg.contains("timed out after"), "{msg}");
+        // The timeout text stays stable (other components match on it).
+        assert_eq!(
+            out.unwrap_err().to_string(),
+            "[execute:flight] timed out after 10ms"
+        );
+    }
+
+    /// `lib.rs::is_prepared_statement_lost/1` classifies a failure by walking the
+    /// error chain, so the stage wrapper must keep the original error as the
+    /// source instead of formatting it into a fresh message.
+    #[tokio::test]
+    async fn timed_preserves_the_source_for_error_classification() {
+        let err = timed(Duration::from_secs(1), "execute_prepared:do_get", async {
+            Err::<(), _>(tonic::Status::not_found("gone"))
+        })
+        .await
+        .unwrap_err();
+
+        assert!(
+            crate::is_prepared_statement_lost(&err),
+            "the wrapper dropped the tonic::Status from the chain: {err:?}"
+        );
+        // A contextual error prints only the context with `{}`; the cause is in the
+        // chain, which is why the NIF entry points encode errors with `{:#}`.
+        assert_eq!(err.to_string(), "[execute_prepared:do_get]");
+        assert!(format!("{err:#}").contains("gone"), "{err:#}");
     }
 }

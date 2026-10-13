@@ -15,6 +15,21 @@ on:
           Publish release under this tag, or update release assets if such release exists.
           If empty, release publishing will be skipped.
         required: false
+      linux_os:
+        description: |
+          JSON array of Linux distros to build, for example ["el10"].
+          Build a subset to add assets for a new distro to a release that
+          already exists, without rebuilding the assets it already has.
+          Empty builds every distro.
+        required: false
+        default: ""
+      skip_mac:
+        description: |
+          Skip the macOS builds. Set this when the release already has its
+          macOS assets.
+        required: false
+        type: boolean
+        default: false
 
 env:
   package_name: "datalayers-adapter-erl"
@@ -22,6 +37,7 @@ env:
 
 jobs:
   mac:
+    if: ${{ !inputs.skip_mac }}
     strategy:
       fail-fast: false
       matrix:
@@ -65,25 +81,21 @@ jobs:
       fail-fast: false
       matrix:
         erlang:
-          - otp: "27.3.4.2-6"
+          - otp: "27.3.4.2-9"
             elixir: "1.18.3"
-            builder: "6.0-9"
-          - otp: "28.2-2"
+            builder: "6.2-3"
+          - otp: "28.5.0.7-3"
             elixir: "1.19.1"
-            builder: "6.0-9"
+            builder: "6.2-3"
         arch:
           - amd64
           - arm64
-        os:
-          - ubuntu24.04
-          - ubuntu22.04
-          - ubuntu20.04
-          - debian13
-          - debian12
-          - debian11
-          - el9
-          - el8
-          - amzn2023
+        # The prebuilt file name carries the OTP major only, so one asset per
+        # (version, OTP major, distro, arch) serves every OTP patch release.
+        os: >-
+          ${{ fromJSON(github.event.inputs.linux_os || '["ubuntu24.04",
+          "ubuntu22.04", "ubuntu20.04", "debian13", "debian12", "debian11",
+          "el10", "el9", "el8", "amzn2023"]') }}
 
     runs-on: ${{ github.repository_owner == 'emqx' && format('aws-{0}', matrix.arch) || (matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04') }}
 
@@ -114,7 +126,14 @@ jobs:
 
   release:
     runs-on: ubuntu-latest
-    if: github.event.inputs.release_as || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
+    # always(), because the mac job is skipped when skip_mac is set, and a
+    # skipped dependency skips this job unless the condition states otherwise.
+    if: >-
+      always()
+      && needs.linux.result == 'success'
+      && needs.mac.result != 'failure'
+      && needs.mac.result != 'cancelled'
+      && (github.event.inputs.release_as || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')))
     needs:
       - mac
       - linux

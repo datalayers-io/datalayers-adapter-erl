@@ -18,6 +18,9 @@ cargo build --release
 
 # Should always be `.so`, OTP on macos won't load `.dylib` files.
 cp $(cat ./libpath) "${NIF_PATH}"
+# Record what this library was built from, so `do_prebuilt.sh` can tell a stale
+# cached library from a current one.
+./nif-source-stamp.sh > priv/.nif-source-stamp
 
 if [ "${BUILD_RELEASE:-}" = 1 ]; then
   PKGNAME="$(./pkgname.sh)"

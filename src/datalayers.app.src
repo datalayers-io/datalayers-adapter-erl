@@ -8,7 +8,12 @@
         kernel,
         stdlib
     ]},
-    {env, []},
+    %% Process-wide cap on concurrently running requests. Read once at load time
+    %% (see datalayers_nif:configure/0); keep the default in sync with
+    %% DEFAULT_MAX_IN_FLIGHT in crates/datalayers-adapter-nif/src/lib.rs.
+    {env, [
+        {max_in_flight, 1024}
+    ]},
     {modules, []},
     {licenses, ["Apache-2.0"]},
     {links, []}

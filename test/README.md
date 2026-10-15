@@ -61,4 +61,4 @@ Two things to keep in mind when interpreting the numbers:
   larger than 64 bytes are reference counted, so they are shared rather than deep
   copied;
 - the parameter to `RecordBatch` conversion is *not* part of this measurement: it
-  runs on a tokio worker, after the submit.
+  runs on a bounded blocking worker, after the submit.

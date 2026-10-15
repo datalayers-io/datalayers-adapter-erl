@@ -1,7 +1,7 @@
 -module(datalayers_nif).
 
 -export([
-    async_connect/4,
+    async_connect/5,
     async_use_database/5,
     async_execute/5,
     async_prepare/6,
@@ -9,6 +9,9 @@
     async_close_prepared/5,
 
     stop/1,
+
+    new_cancel_token/0,
+    cancel/1,
 
     set_max_in_flight/1
 ]).
@@ -52,29 +55,36 @@ configure() ->
 %% nothing was sent to the server; whether that is worth retrying is the caller's
 %% decision).
 %%
-%% `TimeoutMs` is the budget the socket has left for this request; `0` means "use
-%% the connection's own default". No NIF blocks the calling process, so a stalled
-%% server can not pin a BEAM scheduler thread.
+%% `Request` is `{DeadlineMs, BudgetMs}` on the Erlang monotonic clock. The
+%% deadline is absolute so parameter copying and runtime queueing count against
+%% it; a zero budget means "use the connection's own default". No NIF blocks the
+%% calling process, so a stalled server can not pin a BEAM scheduler thread.
 
-async_connect(_ReplyPid, _Id, _TimeoutMs, _Opts) ->
+async_connect(_ReplyPid, _Id, _Request, _Token, _Opts) ->
     not_loaded(?LINE).
 
-async_use_database(_ReplyPid, _Id, _TimeoutMs, _Client, _Database) ->
+async_use_database(_ReplyPid, _Id, _Request, _Client, _Database) ->
     not_loaded(?LINE).
 
-async_execute(_ReplyPid, _Id, _TimeoutMs, _Client, _Sql) ->
+async_execute(_ReplyPid, _Id, _Request, _Client, _Sql) ->
     not_loaded(?LINE).
 
-async_prepare(_ReplyPid, _Id, _TimeoutMs, _Client, _Sql, _AutoRebuild) ->
+async_prepare(_ReplyPid, _Id, _Request, _Client, _Sql, _AutoRebuild) ->
     not_loaded(?LINE).
 
-async_execute_prepare(_ReplyPid, _Id, _TimeoutMs, _Client, _Statement, _Params) ->
+async_execute_prepare(_ReplyPid, _Id, _Request, _Client, _Statement, _Params) ->
     not_loaded(?LINE).
 
-async_close_prepared(_ReplyPid, _Id, _TimeoutMs, _Client, _Statement) ->
+async_close_prepared(_ReplyPid, _Id, _Request, _Client, _Statement) ->
     not_loaded(?LINE).
 
 stop(_Client) ->
+    not_loaded(?LINE).
+
+new_cancel_token() ->
+    not_loaded(?LINE).
+
+cancel(_Token) ->
     not_loaded(?LINE).
 
 set_max_in_flight(_Value) ->

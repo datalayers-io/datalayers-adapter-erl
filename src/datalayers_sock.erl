@@ -13,6 +13,9 @@
 -record(state, {
     client :: client_ref() | undefined,
     opts :: opts() | undefined,
+    %% cancellation signal for this socket: it exists before a connection does, so
+    %% a connect that is still in progress can be given up on stop as well
+    token :: reference() | undefined,
     %% Whole-request deadline in milliseconds, taken from the connect options.
     request_timeout = ?DEFAULT_REQUEST_TIMEOUT_MS :: pos_integer(),
     %% id of the request currently in flight. There is at most one per connection,
@@ -77,7 +80,13 @@ start_link() ->
     gen_server:start_link(?MODULE, [], []).
 
 init([]) ->
-    {ok, #state{client = undefined, opts = undefined}}.
+    Token = ?NIF_MODULE:new_cancel_token(),
+    %% A killed process never runs `handle_cast(stop, ...)`. Watch from
+    %% initialization so this also covers a connect that has not produced a
+    %% ClientRef yet.
+    SockPid = self(),
+    _ = spawn(fun() -> cancel_token_when_down(SockPid, Token) end),
+    {ok, #state{client = undefined, opts = undefined, token = Token}}.
 
 %% `current = undefined` means nothing is queued or in flight, so this socket
 %% has never been asked to connect before. Without it a second `connect` issued
@@ -90,10 +99,22 @@ handle_call(
     State = #state{client = undefined, current = undefined}
 ) ->
     State1 = State#state{opts = Opts, request_timeout = request_timeout(Opts)},
-    {noreply, enqueue(connect, [Opts], {reply, From}, State1)};
+    {noreply, enqueue(connect, [State1#state.token, Opts], {reply, From}, State1)};
 handle_call(?REQ(connect, _Args), _From, State) ->
     %% Already connected, or a connect request is still queued or in flight.
     {reply, {error, already_connected}, State};
+handle_call(?REQ(Func, Args), From, State) when Func =:= execute; Func =:= prepare ->
+    case validate_sql(Func, Args) of
+        ok ->
+            case State#state.client of
+                ClientRef when is_reference(ClientRef) ->
+                    {noreply, enqueue(Func, Args, {reply, From}, State)};
+                _ ->
+                    {reply, {error, not_connected}, State}
+            end;
+        {error, _} = Error ->
+            {reply, Error, State}
+    end;
 handle_call(?REQ(_Func, _Args), _From, State = #state{client = ClientRef}) when
     not is_reference(ClientRef)
 ->
@@ -106,6 +127,22 @@ handle_call(?REQ(Func, Args), From, State) ->
     {noreply, enqueue(Func, Args, {reply, From}, State)}.
 
 %% handle_info(?ASYNC_REQ{...}) -- enqueue and dispatch at most one at a time.
+handle_info(?ASYNC_REQ(Func, Args, Callback), State) when
+    Func =:= execute; Func =:= prepare
+->
+    case validate_sql(Func, Args) of
+        ok ->
+            case State#state.client of
+                ClientRef when is_reference(ClientRef) ->
+                    {noreply, enqueue(Func, Args, {callback, Callback}, State)};
+                _ ->
+                    reply_callback(Callback, {error, not_connected}),
+                    {noreply, State}
+            end;
+        {error, _} = Error ->
+            reply_callback(Callback, Error),
+            {noreply, State}
+    end;
 handle_info(?ASYNC_REQ(Func, Args, Callback), State = #state{client = ClientRef}) when
     is_reference(ClientRef)
 ->
@@ -144,6 +181,13 @@ handle_info(_, State) ->
     {noreply, State}.
 
 handle_cast(stop, State = #state{client = ClientRef, current = Current, pending = Pending}) ->
+    %% Cancel first: a connect that is still in progress has no client resource
+    %% yet, and an established connection stops its in-flight operation promptly
+    %% instead of running until its deadline.
+    case State#state.token of
+        undefined -> ok;
+        Token -> _ = ?NIF_MODULE:cancel(Token)
+    end,
     case is_reference(ClientRef) of
         true ->
             %% Fire and forget: `stop/1` drops the client (closing its channel) on
@@ -172,9 +216,23 @@ handle_cast(stop, State = #state{client = ClientRef, current = Current, pending 
 %% Mirrors `ClientOpts::request_timeout/1` on the Rust side.
 request_timeout(Opts) ->
     case maps:get(request_timeout, Opts, undefined) of
-        Ms when is_integer(Ms), Ms > 0 -> Ms;
+        Ms when is_integer(Ms), Ms > 0, Ms =< ?MAX_REQUEST_TIMEOUT_MS -> Ms;
         _ -> ?DEFAULT_REQUEST_TIMEOUT_MS
     end.
+
+validate_sql(execute, [Sql]) ->
+    validate_sql_binary(Sql);
+validate_sql(prepare, [Sql, _AutoRebuild]) ->
+    validate_sql_binary(Sql);
+validate_sql(_Func, _Args) ->
+    ok.
+
+validate_sql_binary(Sql) when is_binary(Sql), byte_size(Sql) =< ?MAX_SQL_BYTES ->
+    ok;
+validate_sql_binary(Sql) when is_binary(Sql) ->
+    {error, {invalid_sql, {too_large, ?MAX_SQL_BYTES}}};
+validate_sql_binary(_Sql) ->
+    {error, {invalid_sql, expected_binary}}.
 
 enqueue(Func, Args, Deliver, State = #state{pending = Pending0, queue = Queue0}) ->
     %% The correlation id is an integer rather than a make_ref(): it is passed into
@@ -201,7 +259,8 @@ maybe_dispatch(State = #state{current = undefined, queue = Queue}) ->
                         Remaining + ?BACKSTOP_MARGIN_MS, self(), {request_expired, Id}
                     ),
                     State2 = State1#state{timer = Timer},
-                    case apply_async_nif(Func, Args, State2#state.client, self(), Id, Remaining) of
+                    Request = {Deadline, State2#state.request_timeout},
+                    case apply_async_nif(Func, Args, State2#state.client, self(), Id, Request) of
                         ok ->
                             State2;
                         {error, Reason} ->
@@ -301,6 +360,14 @@ cancel_timer(Timer) ->
 
 %% Cancels the connection's native operation once the socket is gone. Also runs
 %% for a normal stop, where the cancellation is already in flight.
+cancel_token_when_down(SockPid, Token) ->
+    MRef = erlang:monitor(process, SockPid),
+    receive
+        {'DOWN', MRef, process, SockPid, _Reason} ->
+            _ = ?NIF_MODULE:cancel(Token),
+            ok
+    end.
+
 cancel_when_down(SockPid, ClientRef) ->
     MRef = erlang:monitor(process, SockPid),
     receive
@@ -309,18 +376,18 @@ cancel_when_down(SockPid, ClientRef) ->
             ok
     end.
 
-apply_async_nif(connect, [Opts], _ClientRef, ReplyPid, Id, TimeoutMs) ->
-    ?NIF_MODULE:async_connect(ReplyPid, Id, TimeoutMs, Opts);
-apply_async_nif(use_database, [Database], ClientRef, ReplyPid, Id, TimeoutMs) ->
-    ?NIF_MODULE:async_use_database(ReplyPid, Id, TimeoutMs, ClientRef, Database);
-apply_async_nif(execute, [Sql], ClientRef, ReplyPid, Id, TimeoutMs) ->
-    ?NIF_MODULE:async_execute(ReplyPid, Id, TimeoutMs, ClientRef, Sql);
-apply_async_nif(prepare, [Sql, AutoRebuild], ClientRef, ReplyPid, Id, TimeoutMs) ->
-    ?NIF_MODULE:async_prepare(ReplyPid, Id, TimeoutMs, ClientRef, Sql, AutoRebuild);
-apply_async_nif(execute_prepare, [Statement, Params], ClientRef, ReplyPid, Id, TimeoutMs) ->
-    ?NIF_MODULE:async_execute_prepare(ReplyPid, Id, TimeoutMs, ClientRef, Statement, Params);
-apply_async_nif(close_prepared, [Statement], ClientRef, ReplyPid, Id, TimeoutMs) ->
-    ?NIF_MODULE:async_close_prepared(ReplyPid, Id, TimeoutMs, ClientRef, Statement).
+apply_async_nif(connect, [Token, Opts], _ClientRef, ReplyPid, Id, Request) ->
+    ?NIF_MODULE:async_connect(ReplyPid, Id, Request, Token, Opts);
+apply_async_nif(use_database, [Database], ClientRef, ReplyPid, Id, Request) ->
+    ?NIF_MODULE:async_use_database(ReplyPid, Id, Request, ClientRef, Database);
+apply_async_nif(execute, [Sql], ClientRef, ReplyPid, Id, Request) ->
+    ?NIF_MODULE:async_execute(ReplyPid, Id, Request, ClientRef, Sql);
+apply_async_nif(prepare, [Sql, AutoRebuild], ClientRef, ReplyPid, Id, Request) ->
+    ?NIF_MODULE:async_prepare(ReplyPid, Id, Request, ClientRef, Sql, AutoRebuild);
+apply_async_nif(execute_prepare, [Statement, Params], ClientRef, ReplyPid, Id, Request) ->
+    ?NIF_MODULE:async_execute_prepare(ReplyPid, Id, Request, ClientRef, Statement, Params);
+apply_async_nif(close_prepared, [Statement], ClientRef, ReplyPid, Id, Request) ->
+    ?NIF_MODULE:async_close_prepared(ReplyPid, Id, Request, ClientRef, Statement).
 
 reply_callback({CallbackFun, CallbackArgs}, Res) ->
     _ = erlang:apply(CallbackFun, CallbackArgs ++ [Res]),

@@ -15,6 +15,8 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 15_000;
 /// reply always reaches the buffer worker before it considers the request
 /// expired (an expired request's reply is dropped as a late reply).
 pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 15_000;
+/// Largest accepted whole-request deadline. Keep in sync with the Erlang header.
+pub const MAX_REQUEST_TIMEOUT_MS: u64 = 86_400_000;
 
 #[derive(Clone, Debug)]
 /// The connect Options for the client connecting to the Datalayers server via Arrow Flight SQL protocol.
@@ -87,7 +89,7 @@ impl ClientOpts {
     /// The whole-request deadline, as decided by whoever built these options.
     pub fn request_timeout(&self) -> Duration {
         match self.request_timeout_ms {
-            Some(ms) if ms > 0 => Duration::from_millis(ms),
+            Some(ms) if ms > 0 && ms <= MAX_REQUEST_TIMEOUT_MS => Duration::from_millis(ms),
             _ => Duration::from_millis(DEFAULT_REQUEST_TIMEOUT_MS),
         }
     }
@@ -165,5 +167,17 @@ mod tests {
         };
         assert_eq!(opts.timeout(), Duration::from_millis(2_500));
         assert_eq!(opts.request_timeout(), Duration::from_millis(700));
+    }
+
+    #[test]
+    fn out_of_range_request_timeout_falls_back_to_the_default() {
+        let opts = ClientOpts {
+            request_timeout_ms: Some(u64::MAX),
+            ..Default::default()
+        };
+        assert_eq!(
+            opts.request_timeout(),
+            Duration::from_millis(DEFAULT_REQUEST_TIMEOUT_MS)
+        );
     }
 }

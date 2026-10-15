@@ -8,23 +8,25 @@ mod resource;
 mod types;
 mod util;
 
+use crate::resource::CancelToken;
 use crate::resource::{ClientResource, PreparedStatementResource};
 use arrow_array::RecordBatch;
 use arrow_flight::sql::client::PreparedStatement;
+use arrow_schema::Schema;
 use atoms::*;
 use client::Client;
-use client_opts::ClientOpts;
+use client_opts::{ClientOpts, MAX_REQUEST_TIMEOUT_MS};
 use futures::FutureExt;
 use lazy_static::lazy_static;
 use rustler::env::{OwnedEnv, SavedTerm};
 use rustler::types::LocalPid;
 use rustler::{Encoder, Env, NifResult, Reference, ResourceArc, Term};
 use std::panic::AssertUnwindSafe;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
-use tokio::sync::{Semaphore, broadcast};
+use tokio::sync::{Semaphore, watch};
 use tonic::transport::Channel;
 
 fn is_prepared_statement_lost(err: &anyhow::Error) -> bool {
@@ -46,7 +48,27 @@ lazy_static! {
 pub fn on_load(env: Env, _load_info: Term) -> bool {
     let _ = env.register::<ClientResource>();
     let _ = env.register::<PreparedStatementResource>();
+    let _ = env.register::<CancelToken>();
     true
+}
+
+/// Create the cancellation signal a socket holds for its connection attempt.
+#[rustler::nif]
+fn new_cancel_token() -> ResourceArc<CancelToken> {
+    CancelToken::new()
+}
+
+/// Cancel whatever the token was handed to: an in-progress connect, or the
+/// connection it produced.
+#[rustler::nif]
+fn cancel(token_ref: Reference) -> rustler::Atom {
+    match token_ref.decode::<ResourceArc<CancelToken>>() {
+        Ok(token) => {
+            token.cancel();
+            ok()
+        }
+        Err(_) => error(),
+    }
 }
 
 // =============================================================================
@@ -121,6 +143,7 @@ const MAX_MAX_IN_FLIGHT: i64 = 1_000_000;
 /// environment, and can not be changed at runtime.
 static IN_FLIGHT_CAPACITY: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_IN_FLIGHT);
 static IN_FLIGHT_LIMITER: OnceLock<Semaphore> = OnceLock::new();
+static BINDING_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 /// Decide the process-wide cap from a configured value.
 ///
@@ -149,6 +172,17 @@ fn in_flight_limiter() -> &'static Semaphore {
         .get_or_init(|| Semaphore::new(clamp_permits(IN_FLIGHT_CAPACITY.load(Ordering::Relaxed))))
 }
 
+fn binding_capacity() -> usize {
+    std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get())
+        .unwrap_or(1)
+        .clamp(1, 16)
+}
+
+fn binding_limiter() -> &'static Arc<Semaphore> {
+    BINDING_LIMITER.get_or_init(|| Arc::new(Semaphore::new(binding_capacity())))
+}
+
 /// Configure the process-wide in-flight cap. Called once, when the module is
 /// loaded, with the value of the `datalayers` application environment.
 ///
@@ -170,38 +204,128 @@ fn set_max_in_flight<'a>(value: Term<'a>) -> rustler::Atom {
     ok()
 }
 
+/// A request deadline on the same monotonic clock as Erlang.
+#[derive(Clone, Copy, Debug)]
+struct RequestDeadline {
+    at: Instant,
+    budget: Duration,
+}
+
+impl RequestDeadline {
+    fn new((at_ms, budget_ms): (i64, u64), default: Duration) -> Self {
+        let budget = request_budget(budget_ms, default);
+        let remaining = erlang_monotonic_ms()
+            .and_then(|now_ms| remaining_at(at_ms, now_ms))
+            .unwrap_or_default();
+        Self::from_remaining(remaining, budget)
+    }
+
+    fn from_remaining(remaining: Duration, budget: Duration) -> Self {
+        Self {
+            at: Instant::now()
+                .checked_add(remaining)
+                .unwrap_or_else(Instant::now),
+            budget,
+        }
+    }
+
+    fn remaining(self) -> Option<Duration> {
+        let remaining = self.at.saturating_duration_since(Instant::now());
+        (!remaining.is_zero()).then_some(remaining)
+    }
+}
+
+fn request_budget(budget_ms: u64, default: Duration) -> Duration {
+    match budget_ms {
+        ms if ms > 0 && ms <= MAX_REQUEST_TIMEOUT_MS => Duration::from_millis(ms),
+        _ => default,
+    }
+}
+
+#[cfg(not(test))]
+fn erlang_monotonic_ms() -> Option<i64> {
+    use rustler::sys::{ERL_NIF_TIME_ERROR, ErlNifTimeUnit, enif_monotonic_time};
+
+    let now = unsafe { enif_monotonic_time(ErlNifTimeUnit::ERL_NIF_MSEC) };
+    (now != ERL_NIF_TIME_ERROR).then_some(now)
+}
+
+#[cfg(test)]
+fn erlang_monotonic_ms() -> Option<i64> {
+    Some(0)
+}
+
+fn remaining_at(deadline_ms: i64, now_ms: i64) -> Option<Duration> {
+    let remaining = deadline_ms.saturating_sub(now_ms);
+    (remaining > 0).then(|| Duration::from_millis(remaining as u64))
+}
+
+fn deadline_failure(deadline: RequestDeadline, dispatched: &AtomicBool) -> Option<AsyncPayload> {
+    deadline.remaining().is_none().then(|| {
+        if dispatched.load(Ordering::Relaxed) {
+            AsyncPayload::Error(format!("[request] timed out after {:?}", deadline.budget))
+        } else {
+            AsyncPayload::NotDispatched(format!(
+                "[request] timed out after {:?} before dispatch",
+                deadline.budget
+            ))
+        }
+    })
+}
+
+fn pre_dispatch_timeout(deadline: RequestDeadline) -> AsyncPayload {
+    AsyncPayload::NotDispatched(format!(
+        "[request] timed out after {:?} before dispatch",
+        deadline.budget
+    ))
+}
+
 /// Run `work` under the process-wide in-flight cap and the whole-request deadline.
 ///
 /// The deadline bounds the *entire* request, including the wait for an in-flight
 /// slot, so a request can never hold -- or wait for -- a slot for longer than
 /// that. The per-stage timeouts inside `Client` (`timed`) still bound each
 /// individual await.
-async fn run_bounded<F>(deadline: Duration, permits: &Semaphore, work: F) -> AsyncPayload
+async fn run_bounded<F>(
+    deadline: RequestDeadline,
+    permits: &Semaphore,
+    dispatched: &AtomicBool,
+    work: F,
+) -> AsyncPayload
 where
     F: std::future::Future<Output = AsyncPayload>,
 {
-    let started = Instant::now();
+    let Some(remaining) = deadline.remaining() else {
+        return pre_dispatch_timeout(deadline);
+    };
 
     // Waiting for a slot is not dispatched work: report it as such so the caller
     // can tell it apart from a failure that may have reached the server.
-    let permit = match tokio::time::timeout(deadline, permits.acquire()).await {
+    let permit = match tokio::time::timeout(remaining, permits.acquire()).await {
         Ok(Ok(permit)) => permit,
         Ok(Err(_)) => {
             return AsyncPayload::Error("[request] in-flight limiter closed".to_string());
         }
         Err(_) => {
             return AsyncPayload::NotDispatched(format!(
-                "[request] timed out after {deadline:?} waiting for an in-flight slot"
+                "[request] timed out after {:?} waiting for an in-flight slot",
+                deadline.budget
             ));
         }
     };
 
-    // Once the work has started the server may already have accepted the write,
-    // so a timeout here is an ordinary, non-retriable failure.
-    let remaining = deadline.saturating_sub(started.elapsed());
+    let Some(remaining) = deadline.remaining() else {
+        return pre_dispatch_timeout(deadline);
+    };
     let payload = match tokio::time::timeout(remaining, work).await {
         Ok(payload) => payload,
-        Err(_) => AsyncPayload::Error(format!("[request] timed out after {deadline:?}")),
+        Err(_) if dispatched.load(Ordering::Relaxed) => {
+            AsyncPayload::Error(format!("[request] timed out after {:?}", deadline.budget))
+        }
+        Err(_) => AsyncPayload::NotDispatched(format!(
+            "[request] timed out after {:?} before dispatch",
+            deadline.budget
+        )),
     };
     drop(permit);
     payload
@@ -212,11 +336,16 @@ where
 /// The task is detached, so a panic would terminate it before any completion was
 /// sent. The socket would keep its single in-flight slot occupied forever and the
 /// connection would look hung, so panics must never escape this point.
-async fn run_guarded<F>(deadline: Duration, permits: &Semaphore, work: F) -> AsyncPayload
+async fn run_guarded<F>(
+    deadline: RequestDeadline,
+    permits: &Semaphore,
+    dispatched: &AtomicBool,
+    work: F,
+) -> AsyncPayload
 where
     F: std::future::Future<Output = AsyncPayload>,
 {
-    match AssertUnwindSafe(run_bounded(deadline, permits, work))
+    match AssertUnwindSafe(run_bounded(deadline, permits, dispatched, work))
         .catch_unwind()
         .await
     {
@@ -240,25 +369,19 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 /// Cancelling cannot undo a request the server has already accepted, so the
 /// failure is deliberately an ordinary one: the caller must not treat it as safe
 /// to retry.
-async fn cancellable<F>(mut cancelled: broadcast::Receiver<()>, work: F) -> AsyncPayload
+async fn cancellable<F>(mut cancelled: watch::Receiver<bool>, work: F) -> AsyncPayload
 where
     F: std::future::Future<Output = AsyncPayload>,
 {
+    if *cancelled.borrow() {
+        return AsyncPayload::Error("[request] cancelled: the socket was stopped".to_string());
+    }
     tokio::select! {
         biased;
-        _ = cancelled.recv() => {
+        _ = cancelled.changed() => {
             AsyncPayload::Error("[request] cancelled: the socket was stopped".to_string())
         }
         payload = work => payload,
-    }
-}
-
-/// The deadline a request must finish by: the per-request budget handed down by
-/// the socket, or the connection's own default when the caller passes `0`.
-fn request_deadline(timeout_ms: u64, default: Duration) -> Duration {
-    match timeout_ms {
-        0 => default,
-        ms => Duration::from_millis(ms),
     }
 }
 
@@ -270,14 +393,15 @@ fn request_deadline(timeout_ms: u64, default: Duration) -> Duration {
 fn submit<F>(
     reply_pid: LocalPid,
     id: i64,
-    deadline: Duration,
-    cancel: Option<broadcast::Receiver<()>>,
+    deadline: RequestDeadline,
+    dispatched: Arc<AtomicBool>,
+    cancel: Option<watch::Receiver<bool>>,
     work: F,
 ) where
     F: std::future::Future<Output = AsyncPayload> + Send + 'static,
 {
     RT.spawn(async move {
-        let work = run_guarded(deadline, in_flight_limiter(), work);
+        let work = run_guarded(deadline, in_flight_limiter(), &dispatched, work);
         let payload = match cancel {
             Some(cancelled) => cancellable(cancelled, work).await,
             None => work.await,
@@ -294,22 +418,41 @@ fn async_connect<'a>(
     env: Env<'a>,
     reply_pid: LocalPid,
     id: i64,
-    timeout_ms: u64,
+    request: (i64, u64),
+    token_ref: Reference<'a>,
     opts: ClientOpts,
 ) -> NifResult<Term<'a>> {
-    let deadline = request_deadline(timeout_ms, opts.request_timeout());
+    let deadline = RequestDeadline::new(request, opts.request_timeout());
     // The connection's default is the *configured* budget, not what is left of this
     // connect attempt's budget: a connect that used 10s of a 15s budget must not
     // leave every later operation with 5s.
     let default_timeout = opts.request_timeout();
-    // A connection that is still being set up has no resource to cancel yet; its
-    // own budget bounds it.
-    submit(reply_pid, id, deadline, None, async move {
-        match Client::try_new(&opts).await {
-            Ok(client) => AsyncPayload::Connected(ClientResource::new(client, default_timeout)),
-            Err(e) => AsyncPayload::Error(format!("{e:#}")),
-        }
-    });
+    let token: ResourceArc<CancelToken> = match token_ref.decode() {
+        Ok(token) => token,
+        Err(_) => return Ok((error(), "invalid_cancel_token").encode(env)),
+    };
+    // Same channel for the connect attempt and, once it succeeds, for every
+    // operation on the connection it produced.
+    let cancel = token.sender().subscribe();
+    let dispatched = Arc::new(AtomicBool::new(false));
+    let work_dispatched = Arc::clone(&dispatched);
+    submit(
+        reply_pid,
+        id,
+        deadline,
+        dispatched,
+        Some(cancel),
+        async move {
+            match Client::try_new(&opts, || work_dispatched.store(true, Ordering::Relaxed)).await {
+                Ok(client) => AsyncPayload::Connected(ClientResource::new(
+                    client,
+                    default_timeout,
+                    token.sender(),
+                )),
+                Err(e) => AsyncPayload::Error(format!("{e:#}")),
+            }
+        },
+    );
     Ok(ok().encode(env))
 }
 
@@ -318,7 +461,7 @@ fn async_use_database<'a>(
     env: Env<'a>,
     reply_pid: LocalPid,
     id: i64,
-    timeout_ms: u64,
+    request: (i64, u64),
     client_resource_ref: Reference<'a>,
     database: String,
 ) -> NifResult<Term<'a>> {
@@ -326,19 +469,29 @@ fn async_use_database<'a>(
         Ok(r) => r,
         Err(_) => return Ok((error(), "invalid_client_resource").encode(env)),
     };
-    let request_timeout = request_deadline(timeout_ms, client_resource.request_timeout);
+    let deadline = RequestDeadline::new(request, client_resource.request_timeout);
 
     let cancel = client_resource.cancel.subscribe();
-    submit(reply_pid, id, request_timeout, Some(cancel), async move {
-        let mut client_guard = client_resource.inner.lock().await;
-        match &mut *client_guard {
-            Some(client) => {
-                client.use_database(&database);
-                AsyncPayload::UseDatabase
+    let dispatched = Arc::new(AtomicBool::new(false));
+    let work_dispatched = Arc::clone(&dispatched);
+    submit(
+        reply_pid,
+        id,
+        deadline,
+        dispatched,
+        Some(cancel),
+        async move {
+            let mut client_guard = client_resource.inner.lock().await;
+            match &mut *client_guard {
+                Some(client) => {
+                    work_dispatched.store(true, Ordering::Relaxed);
+                    client.use_database(&database);
+                    AsyncPayload::UseDatabase
+                }
+                None => AsyncPayload::Error("client_stopped".to_string()),
             }
-            None => AsyncPayload::Error("client_stopped".to_string()),
-        }
-    });
+        },
+    );
 
     Ok(ok().encode(env))
 }
@@ -352,12 +505,15 @@ fn async_use_database<'a>(
 ///      [<<"rust">>,               <<"2025-06-20T11:15:32+08:00">>]
 ///     ]} | {error, Reason}
 /// ```
-#[rustler::nif]
+// The `String` argument copies the SQL binary before the NIF body runs. Keep that
+// copy off normal BEAM schedulers; the Erlang socket also rejects oversized SQL
+// before reaching this boundary.
+#[rustler::nif(schedule = "DirtyCpu")]
 fn async_execute<'a>(
     env: Env<'a>,
     reply_pid: LocalPid,
     id: i64,
-    timeout_ms: u64,
+    request: (i64, u64),
     client_resource_ref: Reference<'a>,
     sql: String,
 ) -> NifResult<Term<'a>> {
@@ -365,29 +521,43 @@ fn async_execute<'a>(
         Ok(r) => r,
         Err(_) => return Ok((error(), "invalid_client_resource").encode(env)),
     };
-    let request_timeout = request_deadline(timeout_ms, client_resource.request_timeout);
+    let deadline = RequestDeadline::new(request, client_resource.request_timeout);
 
     let cancel = client_resource.cancel.subscribe();
-    submit(reply_pid, id, request_timeout, Some(cancel), async move {
-        let mut client_guard = client_resource.inner.lock().await;
-        match &mut *client_guard {
-            Some(client) => match client.execute(&sql).await {
-                Ok(batches) => AsyncPayload::Rows(util::record_batch_to_term(&batches[..])),
-                Err(e) => AsyncPayload::Error(format!("{e:#}")),
-            },
-            None => AsyncPayload::Error("client_stopped".to_string()),
-        }
-    });
+    let dispatched = Arc::new(AtomicBool::new(false));
+    let work_dispatched = Arc::clone(&dispatched);
+    submit(
+        reply_pid,
+        id,
+        deadline,
+        dispatched,
+        Some(cancel),
+        async move {
+            let mut client_guard = client_resource.inner.lock().await;
+            match &mut *client_guard {
+                Some(client) => {
+                    work_dispatched.store(true, Ordering::Relaxed);
+                    match client.execute(&sql).await {
+                        Ok(batches) => AsyncPayload::Rows(util::record_batch_to_term(&batches[..])),
+                        Err(e) => AsyncPayload::Error(format!("{e:#}")),
+                    }
+                }
+                None => AsyncPayload::Error("client_stopped".to_string()),
+            }
+        },
+    );
 
     Ok(ok().encode(env))
 }
 
-#[rustler::nif]
+// Like `async_execute`, decoding copies the SQL statement. It is bounded by the
+// Erlang-side size check and runs on a dirty CPU scheduler.
+#[rustler::nif(schedule = "DirtyCpu")]
 fn async_prepare<'a>(
     env: Env<'a>,
     reply_pid: LocalPid,
     id: i64,
-    timeout_ms: u64,
+    request: (i64, u64),
     client_resource_ref: Reference<'a>,
     sql: String,
     auto_rebuild: bool,
@@ -396,23 +566,35 @@ fn async_prepare<'a>(
         Ok(r) => r,
         Err(_) => return Ok((error(), "invalid_client_resource").encode(env)),
     };
-    let request_timeout = request_deadline(timeout_ms, client_resource.request_timeout);
+    let deadline = RequestDeadline::new(request, client_resource.request_timeout);
 
     let cancel = client_resource.cancel.subscribe();
-    submit(reply_pid, id, request_timeout, Some(cancel), async move {
-        let mut client_guard = client_resource.inner.lock().await;
-        match &mut *client_guard {
-            Some(client) => match client.prepare(&sql).await {
-                Ok(statement) => AsyncPayload::Prepared(PreparedStatementResource::new(
-                    statement,
-                    sql,
-                    auto_rebuild,
-                )),
-                Err(e) => AsyncPayload::Error(format!("{e:#}")),
-            },
-            None => AsyncPayload::Error("client_stopped".to_string()),
-        }
-    });
+    let dispatched = Arc::new(AtomicBool::new(false));
+    let work_dispatched = Arc::clone(&dispatched);
+    submit(
+        reply_pid,
+        id,
+        deadline,
+        dispatched,
+        Some(cancel),
+        async move {
+            let mut client_guard = client_resource.inner.lock().await;
+            match &mut *client_guard {
+                Some(client) => {
+                    work_dispatched.store(true, Ordering::Relaxed);
+                    match client.prepare(&sql).await {
+                        Ok(statement) => AsyncPayload::Prepared(PreparedStatementResource::new(
+                            statement,
+                            sql,
+                            auto_rebuild,
+                        )),
+                        Err(e) => AsyncPayload::Error(format!("{e:#}")),
+                    }
+                }
+                None => AsyncPayload::Error("client_stopped".to_string()),
+            }
+        },
+    );
 
     Ok(ok().encode(env))
 }
@@ -426,7 +608,7 @@ fn async_execute_prepare<'a>(
     env: Env<'a>,
     reply_pid: LocalPid,
     id: i64,
-    timeout_ms: u64,
+    request: (i64, u64),
     client_resource_ref: Reference<'a>,
     statement_resource_ref: Reference<'a>,
     params: Term<'a>,
@@ -440,7 +622,7 @@ fn async_execute_prepare<'a>(
             Ok(r) => r,
             Err(_) => return Ok((error(), "invalid_statement_resource").encode(env)),
         };
-    let request_timeout = request_deadline(timeout_ms, client_resource.request_timeout);
+    let deadline = RequestDeadline::new(request, client_resource.request_timeout);
 
     // Only the term copy happens on the BEAM scheduler. Locking the resources and
     // converting the parameter matrix into an Arrow `RecordBatch` both scale with
@@ -450,82 +632,127 @@ fn async_execute_prepare<'a>(
     let saved_params = owned_env.save(params);
 
     let cancel = client_resource.cancel.subscribe();
-    submit(reply_pid, id, request_timeout, Some(cancel), async move {
-        let mut client_guard = client_resource.inner.lock().await;
-        let Some(client) = &mut *client_guard else {
-            return AsyncPayload::Error("client_or_statement_stopped".to_string());
-        };
-        let mut statement_guard = statement_resource.inner.lock().await;
-
-        // `close_prepared/1` takes the statement out of the resource; rebuild it when
-        // the caller asked for auto_rebuild, exactly like the synchronous path does.
-        //
-        // `&OwnedEnv` is `Send` but not `Sync`, so a borrow of it must never be held
-        // across an await or the whole task future stops being `Send`. The parameter
-        // binding is therefore built in a synchronous scope, between the awaits.
-        if statement_guard.is_none() {
-            if !statement_resource.auto_rebuild {
+    let dispatched = Arc::new(AtomicBool::new(false));
+    let work_dispatched = Arc::clone(&dispatched);
+    submit(
+        reply_pid,
+        id,
+        deadline,
+        dispatched,
+        Some(cancel),
+        async move {
+            let mut client_guard = client_resource.inner.lock().await;
+            let Some(client) = &mut *client_guard else {
                 return AsyncPayload::Error("client_or_statement_stopped".to_string());
-            }
-            return match client.prepare(&statement_resource.sql).await {
-                Ok(mut new_statement) => {
-                    let binding =
-                        match binding_from_saved(&owned_env, &saved_params, &new_statement) {
-                            Ok(binding) => binding,
+            };
+            let mut statement_guard = statement_resource.inner.lock().await;
+            let mut owned_env = owned_env;
+            let mut saved_params = saved_params;
+
+            // `close_prepared/1` takes the statement out of the resource; rebuild it when
+            // the caller asked for auto_rebuild, exactly like the synchronous path does.
+            if statement_guard.is_none() {
+                if !statement_resource.auto_rebuild {
+                    return AsyncPayload::Error("client_or_statement_stopped".to_string());
+                }
+                // The rebuild sends a Prepare RPC. Once it may have reached the
+                // server, this request is no longer safely "not dispatched".
+                work_dispatched.store(true, Ordering::Relaxed);
+                return match client.prepare(&statement_resource.sql).await {
+                    Ok(mut new_statement) => {
+                        let schema = match parameter_schema(&new_statement) {
+                            Ok(schema) => schema,
                             Err(err) => return err,
                         };
-                    match client.execute_prepared(&mut new_statement, binding).await {
-                        Ok(batches) => {
-                            *statement_guard = Some(new_statement);
-                            AsyncPayload::Rows(util::record_batch_to_term(&batches[..]))
+                        let converted =
+                            match binding_from_saved(owned_env, saved_params, schema).await {
+                                Ok(converted) => converted,
+                                Err(err) => return err,
+                            };
+                        if let Some(err) = deadline_failure(deadline, &work_dispatched) {
+                            return err;
                         }
-                        Err(e2) => AsyncPayload::Error(format!("{e2:#}")),
+                        match client
+                            .execute_prepared(&mut new_statement, converted.binding)
+                            .await
+                        {
+                            Ok(batches) => {
+                                *statement_guard = Some(new_statement);
+                                AsyncPayload::Rows(util::record_batch_to_term(&batches[..]))
+                            }
+                            Err(e2) => AsyncPayload::Error(format!("{e2:#}")),
+                        }
                     }
-                }
-                Err(rebuild_err) => AsyncPayload::Error(format!("{rebuild_err:#}")),
+                    Err(rebuild_err) => AsyncPayload::Error(format!("{rebuild_err:#}")),
+                };
+            }
+            let statement = match &mut *statement_guard {
+                Some(statement) => statement,
+                None => return AsyncPayload::Error("client_or_statement_stopped".to_string()),
             };
-        }
-        let statement = match &mut *statement_guard {
-            Some(statement) => statement,
-            None => return AsyncPayload::Error("client_or_statement_stopped".to_string()),
-        };
 
-        let binding = match binding_from_saved(&owned_env, &saved_params, statement) {
-            Ok(binding) => binding,
-            Err(err) => return err,
-        };
+            let schema = match parameter_schema(statement) {
+                Ok(schema) => schema,
+                Err(err) => return err,
+            };
+            let converted = match binding_from_saved(owned_env, saved_params, schema).await {
+                Ok(converted) => converted,
+                Err(err) => return err,
+            };
+            let ConvertedBinding {
+                owned_env: returned_env,
+                saved_params: returned_params,
+                binding,
+            } = converted;
+            owned_env = returned_env;
+            saved_params = returned_params;
+            if let Some(err) = deadline_failure(deadline, &work_dispatched) {
+                return err;
+            }
+            work_dispatched.store(true, Ordering::Relaxed);
 
-        match client.execute_prepared(statement, binding).await {
-            Ok(batches) => AsyncPayload::Rows(util::record_batch_to_term(&batches[..])),
-            Err(e) => {
-                if statement_resource.auto_rebuild && is_prepared_statement_lost(&e) {
-                    match client.prepare(&statement_resource.sql).await {
-                        Ok(mut new_statement) => {
-                            let new_binding =
-                                match binding_from_saved(&owned_env, &saved_params, &new_statement)
-                                {
-                                    Ok(binding) => binding,
+            match client.execute_prepared(statement, binding).await {
+                Ok(batches) => AsyncPayload::Rows(util::record_batch_to_term(&batches[..])),
+                Err(e) => {
+                    if statement_resource.auto_rebuild && is_prepared_statement_lost(&e) {
+                        if let Some(err) = deadline_failure(deadline, &work_dispatched) {
+                            return err;
+                        }
+                        match client.prepare(&statement_resource.sql).await {
+                            Ok(mut new_statement) => {
+                                let schema = match parameter_schema(&new_statement) {
+                                    Ok(schema) => schema,
                                     Err(err) => return err,
                                 };
-                            match client
-                                .execute_prepared(&mut new_statement, new_binding)
-                                .await
-                            {
-                                Ok(batches) => {
-                                    *statement = new_statement;
-                                    AsyncPayload::Rows(util::record_batch_to_term(&batches[..]))
+                                let converted =
+                                    match binding_from_saved(owned_env, saved_params, schema).await
+                                    {
+                                        Ok(converted) => converted,
+                                        Err(err) => return err,
+                                    };
+                                if let Some(err) = deadline_failure(deadline, &work_dispatched) {
+                                    return err;
                                 }
-                                Err(e2) => AsyncPayload::Error(format!("{e2:#}")),
+                                match client
+                                    .execute_prepared(&mut new_statement, converted.binding)
+                                    .await
+                                {
+                                    Ok(batches) => {
+                                        *statement = new_statement;
+                                        AsyncPayload::Rows(util::record_batch_to_term(&batches[..]))
+                                    }
+                                    Err(e2) => AsyncPayload::Error(format!("{e2:#}")),
+                                }
                             }
+                            Err(rebuild_err) => AsyncPayload::Error(format!("{rebuild_err:#}")),
                         }
-                        Err(rebuild_err) => AsyncPayload::Error(format!("{rebuild_err:#}")),
+                    } else {
+                        AsyncPayload::Error(format!("{e:#}"))
                     }
-                } else {
-                    AsyncPayload::Error(format!("{e:#}"))
                 }
             }
-        }
-    });
+        },
+    );
 
     Ok(ok().encode(env))
 }
@@ -535,7 +762,7 @@ fn async_close_prepared<'a>(
     env: Env<'a>,
     reply_pid: LocalPid,
     id: i64,
-    timeout_ms: u64,
+    request: (i64, u64),
     client_resource_ref: Reference<'a>,
     statement_resource_ref: Reference<'a>,
 ) -> NifResult<Term<'a>> {
@@ -548,21 +775,31 @@ fn async_close_prepared<'a>(
             Ok(r) => r,
             Err(_) => return Ok((error(), "invalid_statement_resource").encode(env)),
         };
-    let request_timeout = request_deadline(timeout_ms, client_resource.request_timeout);
+    let deadline = RequestDeadline::new(request, client_resource.request_timeout);
 
     let cancel = client_resource.cancel.subscribe();
-    submit(reply_pid, id, request_timeout, Some(cancel), async move {
-        let client_guard = client_resource.inner.lock().await;
-        let mut statement_guard = statement_resource.inner.lock().await;
-        if let (Some(client), Some(statement)) = (&*client_guard, statement_guard.take()) {
-            match client.close_prepared(statement).await {
-                Ok(_) => AsyncPayload::Closed,
-                Err(e) => AsyncPayload::Error(format!("{e:#}")),
+    let dispatched = Arc::new(AtomicBool::new(false));
+    let work_dispatched = Arc::clone(&dispatched);
+    submit(
+        reply_pid,
+        id,
+        deadline,
+        dispatched,
+        Some(cancel),
+        async move {
+            let client_guard = client_resource.inner.lock().await;
+            let mut statement_guard = statement_resource.inner.lock().await;
+            if let (Some(client), Some(statement)) = (&*client_guard, statement_guard.take()) {
+                work_dispatched.store(true, Ordering::Relaxed);
+                match client.close_prepared(statement).await {
+                    Ok(_) => AsyncPayload::Closed,
+                    Err(e) => AsyncPayload::Error(format!("{e:#}")),
+                }
+            } else {
+                AsyncPayload::Error("client_or_statement_stopped".to_string())
             }
-        } else {
-            AsyncPayload::Error("client_or_statement_stopped".to_string())
-        }
-    });
+        },
+    );
 
     Ok(ok().encode(env))
 }
@@ -588,33 +825,70 @@ fn stop(client_resource_ref: Reference) -> rustler::Atom {
     ok()
 }
 
-/// Build the Arrow binding for `statement` from parameters saved in `owned_env`.
+fn parameter_schema(statement: &PreparedStatement<Channel>) -> Result<Arc<Schema>, AsyncPayload> {
+    statement
+        .parameter_schema()
+        .map(|schema| Arc::new((*schema).clone()))
+        .map_err(|e| AsyncPayload::Error(format!("invalid_params: {e}")))
+}
+
+struct ConvertedBinding {
+    owned_env: OwnedEnv,
+    saved_params: SavedTerm,
+    binding: RecordBatch,
+}
+
+/// Build the Arrow binding on a bounded blocking worker.
 ///
-/// This runs on the task thread: converting the parameter matrix scales with the
-/// input size, so it must not happen on a BEAM scheduler.
-fn binding_from_saved(
-    owned_env: &OwnedEnv,
-    saved_params: &SavedTerm,
-    statement: &PreparedStatement<Channel>,
-) -> Result<RecordBatch, AsyncPayload> {
-    owned_env.run(|env| {
-        let params = saved_params.load(env);
-        match util::params_to_record_batch(statement, params) {
-            Ok(binding) => Ok(binding),
-            Err(rustler::Error::BadArg) => Err(AsyncPayload::Error("badarg".to_string())),
-            Err(e) => Err(AsyncPayload::Error(format!("invalid_params: {e:?}"))),
-        }
+/// The conversion permit moves into the blocking closure, so dropping a timed-out
+/// request future does not let the still-running conversion consume an unbounded
+/// number of blocking threads.
+async fn binding_from_saved(
+    owned_env: OwnedEnv,
+    saved_params: SavedTerm,
+    schema: Arc<Schema>,
+) -> Result<ConvertedBinding, AsyncPayload> {
+    let permit = binding_limiter()
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| AsyncPayload::Error("parameter conversion limiter closed".to_string()))?;
+
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let binding = owned_env.run(|env| {
+            let params = saved_params.load(env);
+            match util::params_to_record_batch(schema, params) {
+                Ok(binding) => Ok(binding),
+                Err(rustler::Error::BadArg) => Err(AsyncPayload::Error("badarg".to_string())),
+                Err(e) => Err(AsyncPayload::Error(format!("invalid_params: {e:?}"))),
+            }
+        })?;
+        Ok(ConvertedBinding {
+            owned_env,
+            saved_params,
+            binding,
+        })
     })
+    .await
+    .map_err(|e| AsyncPayload::Error(format!("parameter conversion failed: {e}")))?
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AsyncPayload, cancellable, clamp_permits, in_flight_limiter, is_prepared_statement_lost,
-        request_deadline, resolve_capacity, run_bounded, run_guarded,
+        AsyncPayload, RequestDeadline, cancellable, clamp_permits, in_flight_limiter,
+        is_prepared_statement_lost, remaining_at, request_budget, resolve_capacity, run_bounded,
+        run_guarded,
     };
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
     use tokio::sync::Semaphore;
+
+    fn deadline_after(budget: Duration) -> RequestDeadline {
+        RequestDeadline::from_remaining(budget, budget)
+    }
 
     #[test]
     fn not_found_is_lost() {
@@ -643,10 +917,16 @@ mod tests {
     #[tokio::test]
     async fn the_request_deadline_bounds_a_hanging_operation() {
         let permits = Semaphore::new(4);
+        let dispatched = Arc::new(AtomicBool::new(false));
+        let work_dispatched = Arc::clone(&dispatched);
         let out = run_bounded(
-            Duration::from_millis(50),
+            deadline_after(Duration::from_millis(50)),
             &permits,
-            std::future::pending::<AsyncPayload>(),
+            &dispatched,
+            async move {
+                work_dispatched.store(true, Ordering::Relaxed);
+                std::future::pending::<AsyncPayload>().await
+            },
         )
         .await;
         match out {
@@ -660,9 +940,13 @@ mod tests {
     #[tokio::test]
     async fn a_fast_operation_is_not_affected_by_the_deadline() {
         let permits = Semaphore::new(4);
-        let out = run_bounded(Duration::from_secs(30), &permits, async {
-            AsyncPayload::Rows(vec![vec!["ok".to_string()]])
-        })
+        let dispatched = AtomicBool::new(false);
+        let out = run_bounded(
+            deadline_after(Duration::from_secs(30)),
+            &permits,
+            &dispatched,
+            async { AsyncPayload::Rows(vec![vec!["ok".to_string()]]) },
+        )
         .await;
         match out {
             AsyncPayload::Rows(rows) => assert_eq!(rows, vec![vec!["ok".to_string()]]),
@@ -675,12 +959,16 @@ mod tests {
     #[tokio::test]
     async fn requests_over_the_in_flight_cap_wait_for_their_deadline() {
         let permits = Semaphore::new(1);
+        let dispatched = AtomicBool::new(false);
         // Hold the only permit, as if another request were in flight.
         let held = permits.acquire().await.expect("acquire the only permit");
 
-        let blocked = run_bounded(Duration::from_millis(50), &permits, async {
-            AsyncPayload::Closed
-        })
+        let blocked = run_bounded(
+            deadline_after(Duration::from_millis(50)),
+            &permits,
+            &dispatched,
+            async { AsyncPayload::Closed },
+        )
         .await;
         match blocked {
             // It never ran, so the caller may safely retry it.
@@ -691,9 +979,12 @@ mod tests {
         }
 
         drop(held);
-        let allowed = run_bounded(Duration::from_millis(50), &permits, async {
-            AsyncPayload::Closed
-        })
+        let allowed = run_bounded(
+            deadline_after(Duration::from_millis(50)),
+            &permits,
+            &dispatched,
+            async { AsyncPayload::Closed },
+        )
         .await;
         assert!(matches!(allowed, AsyncPayload::Closed));
     }
@@ -703,9 +994,15 @@ mod tests {
     #[tokio::test]
     async fn a_panicking_operation_is_delivered_as_an_error() {
         let permits = Semaphore::new(4);
-        let out = run_guarded(Duration::from_secs(5), &permits, async {
-            panic!("boom");
-        })
+        let dispatched = AtomicBool::new(false);
+        let out = run_guarded(
+            deadline_after(Duration::from_secs(5)),
+            &permits,
+            &dispatched,
+            async {
+                panic!("boom");
+            },
+        )
         .await;
         match out {
             AsyncPayload::Error(msg) => {
@@ -721,13 +1018,51 @@ mod tests {
     #[test]
     fn the_request_budget_falls_back_to_the_connection_default() {
         assert_eq!(
-            request_deadline(0, Duration::from_secs(15)),
+            request_budget(0, Duration::from_secs(15)),
             Duration::from_secs(15)
         );
         assert_eq!(
-            request_deadline(250, Duration::from_secs(15)),
+            request_budget(250, Duration::from_secs(15)),
             Duration::from_millis(250)
         );
+        assert_eq!(
+            request_budget(u64::MAX, Duration::from_secs(15)),
+            Duration::from_secs(15)
+        );
+    }
+
+    #[test]
+    fn remaining_budget_uses_the_absolute_deadline() {
+        assert_eq!(remaining_at(1_250, 1_000), Some(Duration::from_millis(250)));
+        assert_eq!(remaining_at(1_000, 1_000), None);
+        assert_eq!(remaining_at(999, 1_000), None);
+    }
+
+    /// Time spent copying or waiting to enter the runtime counts against the
+    /// socket's original deadline. Expired work must not run at all.
+    #[tokio::test]
+    async fn a_deadline_that_expired_before_polling_rejects_work() {
+        let permits = Semaphore::new(1);
+        let dispatched = AtomicBool::new(false);
+        let ran = Arc::new(AtomicBool::new(false));
+        let work_ran = Arc::clone(&ran);
+        let deadline = deadline_after(Duration::from_millis(20));
+
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let out = run_bounded(deadline, &permits, &dispatched, async move {
+            work_ran.store(true, Ordering::Relaxed);
+            AsyncPayload::Closed
+        })
+        .await;
+
+        match out {
+            AsyncPayload::NotDispatched(message) => {
+                assert!(message.contains("[request] timed out after"), "{message}");
+                assert!(message.contains("before dispatch"), "{message}");
+            }
+            _ => panic!("expired work must be rejected before dispatch"),
+        }
+        assert!(!ran.load(Ordering::Relaxed));
     }
 
     /// The cap is a node-level setting: a nonsensical value falls back to the
@@ -751,11 +1086,11 @@ mod tests {
     /// instead of letting it run until its deadline.
     #[tokio::test]
     async fn a_cancelled_operation_gives_up_promptly() {
-        let (cancel, _keep) = tokio::sync::broadcast::channel(1);
+        let (cancel, _keep) = tokio::sync::watch::channel(false);
         let sender = cancel.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            let _ = sender.send(());
+            sender.send_replace(true);
         });
 
         let started = Instant::now();
@@ -769,6 +1104,21 @@ mod tests {
             _ => panic!("a cancelled operation must not run to completion"),
         }
         assert!(elapsed < Duration::from_secs(1), "took {elapsed:?}");
+    }
+
+    /// Cancellation state must survive the gap between the socket death signal
+    /// and the NIF subscribing to the token.
+    #[tokio::test]
+    async fn cancellation_before_subscribe_is_not_lost() {
+        let (cancel, _keep) = tokio::sync::watch::channel(false);
+        cancel.send_replace(true);
+        let out = tokio::time::timeout(
+            Duration::from_millis(100),
+            cancellable(cancel.subscribe(), std::future::pending::<AsyncPayload>()),
+        )
+        .await
+        .expect("cancellation was lost before subscription");
+        assert!(matches!(out, AsyncPayload::Error(message) if message.contains("cancelled")));
     }
 
     /// `max_in_flight` is an arbitrary decoded integer and `Semaphore::new` panics

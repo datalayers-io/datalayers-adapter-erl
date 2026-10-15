@@ -65,7 +65,7 @@ Opts = #{
 **Optional settings:**
 
 -   `timeout` — per-stage flight timeout in milliseconds. Every network stage (connect, handshake, execute, fetch) is bounded by it. Defaults to `15000`; `0` means "not set".
--   `request_timeout` — whole-request deadline in milliseconds, including the time spent waiting for a free in-flight slot. Defaults to `15000`; `0` means "not set".
+-   `request_timeout` — whole-request deadline in milliseconds, including queueing, runtime scheduling, and parameter conversion. Accepted values are `1..86400000`; defaults and invalid or out-of-range values use `15000`. `0` means "not set".
 
 Both are per connection. The cap on how many requests may run at the same time is
 per node instead (see [In-flight limit](#in-flight-limit)).
@@ -93,6 +93,13 @@ Use `datalayers:execute/2` to run SQL queries.
 {ok, Result} = datalayers:execute(Client, <<"SELECT version()">>).
 %% Result will be [[<<"2.3.8">>]]
 ```
+
+SQL binaries must not exceed **8 MiB**. This is a hard limit because the statement
+is copied across the NIF boundary. Keep SQL substantially smaller in normal use;
+for large batches, use prepared statements and `execute_prepare/3` instead of
+rendering a very large batch statement. Oversized synchronous calls return
+`{error, {invalid_sql, {too_large, 8388608}}}` and asynchronous calls deliver the
+same error to their callback.
 
 ### Using a Specific Database
 
@@ -125,13 +132,13 @@ ok = datalayers:close_prepared(Client, PreparedStatement).
 
 ### Asynchronous Operations
 
-The library also provides asynchronous versions of `execute`, `prepare`, and `execute_prepare`. They return immediately with `{ok, Client}` — `Client` is the socket process, which the caller can monitor — and deliver the result to the callback instead.
+The library also provides asynchronous versions of `execute`, `prepare`, and `execute_prepare`. They return immediately and deliver the result to the callback instead.
 
-The callback is invoked as `CallbackFun(CallbackArgs ++ [Result])`, where `Result` is `{ok, Value}` or `{error, Reason}`.
+The callback is invoked as `CallbackFun(CallbackArgs ++ [Result])`, where `Result` is `{ok, Value}` or `{error, Reason}` (including `{error, {not_dispatched, Reason}}`, see [Errors](#errors)).
 
 ```erlang
 Callback = {fun(Result) -> io:format("Result: ~p~n", [Result]) end, []},
-{ok, _} = datalayers:async_execute(Client, <<"SELECT * FROM my_table">>, Callback).
+ok = datalayers:async_execute(Client, <<"SELECT * FROM my_table">>, Callback).
 ```
 
 ### Stopping the Client
@@ -144,9 +151,10 @@ ok = datalayers:stop(Client).
 
 ### Errors
 
-A failed call returns `{error, Reason}`. `Reason` is a text description, except
-for `{not_dispatched, Reason}`, which means the request never reached the server
-(nothing was sent), so retrying it is safe if the caller chooses to.
+A failed call returns `{error, Reason}`. `Reason` is usually a text description.
+`{not_dispatched, Reason}` means the request never reached the server (nothing
+was sent), so retrying it is safe if the caller chooses to. Invalid SQL inputs
+return `{invalid_sql, {too_large, MaxBytes}}` or `{invalid_sql, expected_binary}`.
 
 ## Running Tests
 

@@ -83,7 +83,7 @@ pub struct Client {
 }
 
 impl Client {
-    pub async fn try_new(opts: &ClientOpts) -> Result<Self> {
+    pub async fn try_new(opts: &ClientOpts, on_network: impl FnOnce()) -> Result<Self> {
         let uri = opts.format_uri();
         let timeout = opts.timeout();
         // Deliberately no endpoint-level connect timeout: the `timed` wrapper
@@ -109,6 +109,7 @@ impl Client {
                 .context("failed to configure TLS")?;
         }
 
+        on_network();
         let channel = timed(timeout, "connect:tcp", endpoint.connect())
             .await
             .context(format!("Failed to connect to server with uri {uri}"))?;
@@ -291,7 +292,7 @@ mod tests {
         };
 
         let started = Instant::now();
-        let err = match Client::try_new(&opts).await {
+        let err = match Client::try_new(&opts, || {}).await {
             Ok(_) => panic!("connecting to a silent server must fail, not hang"),
             Err(err) => err,
         };
@@ -349,8 +350,13 @@ mod tests {
         };
 
         let started = Instant::now();
-        let out = crate::run_bounded(Duration::from_millis(200), &Semaphore::new(4), async move {
-            match Client::try_new(&opts).await {
+        let deadline = crate::RequestDeadline::from_remaining(
+            Duration::from_millis(200),
+            Duration::from_millis(200),
+        );
+        let dispatched = std::sync::atomic::AtomicBool::new(false);
+        let out = crate::run_bounded(deadline, &Semaphore::new(4), &dispatched, async move {
+            match Client::try_new(&opts, || {}).await {
                 Ok(_) => AsyncPayload::Closed,
                 Err(e) => AsyncPayload::Error(format!("{e:#}")),
             }
@@ -361,7 +367,8 @@ mod tests {
         let _ = std::fs::remove_dir(&dir);
 
         match out {
-            AsyncPayload::Error(msg) => {
+            // The certificate is read before the endpoint can receive a request.
+            AsyncPayload::NotDispatched(msg) => {
                 assert!(msg.contains("timed out after"), "unexpected error: {msg}");
             }
             _ => panic!("a stalled certificate read must not let the request complete"),
@@ -399,7 +406,12 @@ mod tests {
         for _ in 0..16 {
             // Each attempt is expected to time out while its read is stuck on a
             // FIFO nobody writes to.
-            let _ = crate::run_bounded(Duration::from_millis(50), &Semaphore::new(16), async {
+            let deadline = crate::RequestDeadline::from_remaining(
+                Duration::from_millis(50),
+                Duration::from_millis(50),
+            );
+            let dispatched = std::sync::atomic::AtomicBool::new(false);
+            let _ = crate::run_bounded(deadline, &Semaphore::new(16), &dispatched, async {
                 match super::read_file(&path).await {
                     Ok(_) => AsyncPayload::Closed,
                     Err(e) => AsyncPayload::Error(format!("{e:#}")),

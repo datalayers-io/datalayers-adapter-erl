@@ -73,7 +73,8 @@ measure(ClientRef, Stmt, Label, Value, Rows) ->
     %% and it can not report a gap.
     timer:sleep(20),
     {Micros, ok} = timer:tc(fun() ->
-        datalayers_nif:async_execute_prepare(self(), Id, 0, ClientRef, Stmt, Params)
+        Request = {erlang:monotonic_time(millisecond) + 15000, 15000},
+        datalayers_nif:async_execute_prepare(self(), Id, Request, ClientRef, Stmt, Params)
     end),
     Gap = stop_heartbeat(Heartbeat),
     PerRow =

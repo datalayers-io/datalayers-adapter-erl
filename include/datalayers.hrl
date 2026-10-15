@@ -16,7 +16,11 @@
 %% A failure is either a plain text reason, or `{not_dispatched, Reason}` when
 %% nothing was sent to the server; whether that is worth retrying is the caller's
 %% decision.
--type reason() :: binary() | {not_dispatched, binary()}.
+-type reason() ::
+    binary()
+    | {not_dispatched, binary()}
+    | {invalid_sql, {too_large, non_neg_integer()}}
+    | {invalid_sql, expected_binary}.
 
 -type command() :: connect | use_database | execute | prepare | execute_prepare | close_prepared.
 -type args() :: term().
@@ -32,6 +36,12 @@
 %% set `request_timeout`. Keep in sync with `DEFAULT_REQUEST_TIMEOUT_MS` in
 %% `client_opts.rs`.
 -define(DEFAULT_REQUEST_TIMEOUT_MS, 15000).
+%% Keep the absolute deadline, backstop timer, and NIF integer conversions in a
+%% documented range. Larger values fall back to the default.
+-define(MAX_REQUEST_TIMEOUT_MS, 86400000).
+%% SQL is copied across the NIF boundary. Reject oversized statements before
+%% submitting them, while passing normal batch SQL to a dirty CPU scheduler.
+-define(MAX_SQL_BYTES, 8388608).
 
 -define(REQ(Func, Args), {sync, Func, Args}).
 -define(ASYNC_REQ(Func, Args, ResultCallback), {async, Func, Args, ResultCallback}).

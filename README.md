@@ -62,6 +62,28 @@ Opts = #{
 {ok, Client} = datalayers:connect(Opts).
 ```
 
+**Optional settings:**
+
+-   `timeout` — per-stage flight timeout in milliseconds. Every network stage (connect, handshake, execute, fetch) is bounded by it. Defaults to `15000`; `0` means "not set".
+-   `request_timeout` — whole-request deadline in milliseconds, including the time spent waiting for a free in-flight slot. Defaults to `15000`; `0` means "not set".
+
+Both are per connection. The cap on how many requests may run at the same time is
+per node instead (see [In-flight limit](#in-flight-limit)).
+
+### In-flight limit
+
+One native library serves every connection in the node, so the number of requests
+that may run at the same time is capped per node rather than per connection:
+
+```erlang
+%% sys.config
+{datalayers, [{max_in_flight, 1024}]}
+```
+
+The value is read once, when the library is loaded, and can not be changed at
+runtime. It defaults to `1024`; a value outside `1..1000000`, or one that is not
+an integer, is replaced by that default.
+
 ### Executing Queries
 
 Use `datalayers:execute/2` to run SQL queries.
@@ -103,7 +125,9 @@ ok = datalayers:close_prepared(Client, PreparedStatement).
 
 ### Asynchronous Operations
 
-The library also provides asynchronous versions of `execute`, `prepare`, and `execute_prepare`. These functions take a callback function that will be executed with the result.
+The library also provides asynchronous versions of `execute`, `prepare`, and `execute_prepare`. They return immediately and deliver the result to the callback instead.
+
+The callback is invoked as `CallbackFun(CallbackArgs ++ [Result])`, where `Result` is `{ok, Value}` or `{error, Reason}` (including `{error, {not_dispatched, Reason}}`, see [Errors](#errors)).
 
 ```erlang
 Callback = {fun(Result) -> io:format("Result: ~p~n", [Result]) end, []},
@@ -117,6 +141,12 @@ To close the connection and clean up resources, use `datalayers:stop/1`.
 ```erlang
 ok = datalayers:stop(Client).
 ```
+
+### Errors
+
+A failed call returns `{error, Reason}`. `Reason` is a text description, except
+for `{not_dispatched, Reason}`, which means the request never reached the server
+(nothing was sent), so retrying it is safe if the caller chooses to.
 
 ## Running Tests
 

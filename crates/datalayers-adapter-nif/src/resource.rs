@@ -20,8 +20,11 @@ pub struct ClientResource {
 impl rustler::Resource for ClientResource {}
 
 impl ClientResource {
-    pub fn new(client: Client, request_timeout: Duration) -> ResourceArc<Self> {
-        let (cancel, _) = broadcast::channel(1);
+    pub fn new(
+        client: Client,
+        request_timeout: Duration,
+        cancel: broadcast::Sender<()>,
+    ) -> ResourceArc<Self> {
         ResourceArc::new(Self {
             inner: Mutex::new(Some(client)),
             request_timeout,
@@ -32,6 +35,42 @@ impl ClientResource {
     /// Ask the in-flight operation, if any, to give up.
     pub fn cancel_in_flight(&self) {
         let _ = self.cancel.send(());
+    }
+}
+
+/// A cancellation signal that exists before a connection does.
+///
+/// A connect can be stopped while the handshake is still in progress, i.e. before
+/// any `ClientResource` exists. The socket therefore holds one of these per
+/// socket, hands it to `async_connect`, and the resulting connection then reuses
+/// the very same channel for every operation on it.
+pub struct CancelToken {
+    sender: broadcast::Sender<()>,
+}
+
+impl rustler::Resource for CancelToken {}
+
+// The token is a pure signalling handle: a panic while a request is in progress
+// cannot leave it in a state another request could trip over, which is what the
+// unwind-safety markers are about. They are needed because the token crosses the
+// NIF boundary as a resource.
+impl std::panic::UnwindSafe for CancelToken {}
+impl std::panic::RefUnwindSafe for CancelToken {}
+
+impl CancelToken {
+    pub fn new() -> ResourceArc<Self> {
+        let (sender, _) = broadcast::channel(1);
+        ResourceArc::new(Self { sender })
+    }
+
+    /// A handle the connect and, later, its connection can be cancelled with.
+    pub fn sender(&self) -> broadcast::Sender<()> {
+        self.sender.clone()
+    }
+
+    /// Ask the connect (or the connection it produced) to give up.
+    pub fn cancel(&self) {
+        let _ = self.sender.send(());
     }
 }
 

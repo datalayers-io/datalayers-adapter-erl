@@ -80,7 +80,8 @@ groups() ->
         t_queued_requests_expire_without_crashing_the_socket,
         t_socket_never_runs_a_blocking_nif,
         t_stop_releases_a_pending_sync_caller,
-        t_second_connect_while_connecting_is_rejected
+        t_second_connect_while_connecting_is_rejected,
+        t_stopping_during_connect_cancels_the_attempt
     ],
     [
         {tcp, TCs},
@@ -330,7 +331,7 @@ t_prepare_no_rebuild_test(Config) ->
 t_async_execute(Config) ->
     {ok, Client} = datalayers:connect(?conn_opts(Config)),
     Parent = self(),
-    {ok, _} = datalayers:async_execute(Client, <<"SELECT version()">>, async_reply_fun(Parent)),
+    ok = datalayers:async_execute(Client, <<"SELECT version()">>, async_reply_fun(Parent)),
     {ok, [[Vsn]]} = receive_async_result(5000),
     ?assertEqual(?version(Config), Vsn),
     ok = datalayers:stop(Client).
@@ -338,7 +339,7 @@ t_async_execute(Config) ->
 t_async_prepare(Config) ->
     {ok, Client} = datalayers:connect(?conn_opts(Config)),
     Parent = self(),
-    {ok, _} = datalayers:async_prepare(
+    ok = datalayers:async_prepare(
         Client, ?insert_prepare_sql_statement(Config), async_reply_fun(Parent)
     ),
     %% Exercises the ResourceArc -> Erlang term encoding on the NIF worker thread.
@@ -359,7 +360,7 @@ t_async_execute_prepare(Config) ->
     ),
     Parent = self(),
     Timestamp = erlang:system_time(millisecond),
-    {ok, _} = datalayers:async_execute_prepare(
+    ok = datalayers:async_execute_prepare(
         Client,
         PreparedStatement,
         [[Timestamp, 1, 42.0, 1]],
@@ -380,7 +381,7 @@ t_async_ordering(Config) ->
     Sqls = [integer_to_binary(N) || N <- Numbers],
     lists:foreach(
         fun(N) ->
-            {ok, _} = datalayers:async_execute(
+            ok = datalayers:async_execute(
                 Client, <<"SELECT ", N/binary>>, async_reply_fun(Parent)
             )
         end,
@@ -395,7 +396,7 @@ t_async_ordering(Config) ->
 t_async_error_reply(Config) ->
     {ok, Client} = datalayers:connect(?conn_opts(Config)),
     Parent = self(),
-    {ok, _} = datalayers:async_execute(
+    ok = datalayers:async_execute(
         Client,
         <<"SELECT * FROM no_such_db.no_such_table">>,
         async_reply_fun(Parent)
@@ -416,7 +417,7 @@ t_async_prepare_auto_rebuild(Config) ->
     %% path must rebuild it because auto_rebuild is set.
     {ok, _} = datalayers:close_prepared(Client, PreparedStatement),
     Timestamp2 = erlang:system_time(millisecond),
-    {ok, _} = datalayers:async_execute_prepare(
+    ok = datalayers:async_execute_prepare(
         Client,
         PreparedStatement,
         [[Timestamp2, 2, 43.0, 0]],
@@ -436,7 +437,7 @@ t_sync_after_async_ordering(Config) ->
     Sqls = [integer_to_binary(N) || N <- Numbers],
     lists:foreach(
         fun(N) ->
-            {ok, _} = datalayers:async_execute(
+            ok = datalayers:async_execute(
                 Client, <<"SELECT ", N/binary>>, async_reply_fun(Parent)
             )
         end,
@@ -513,7 +514,8 @@ t_nif_honors_the_handed_down_budget(_Config) ->
     Opts = (silent_conn_opts(Port, 60000))#{request_timeout => 60000},
     Id = erlang:unique_integer([monotonic, positive]),
     Started = erlang:monotonic_time(millisecond),
-    ok = datalayers_nif:async_connect(self(), Id, 300, Opts),
+    Token = datalayers_nif:new_cancel_token(),
+    ok = datalayers_nif:async_connect(self(), Id, 300, Token, Opts),
     {error, Reason} = receive_async_result_by_id(Id, 6000),
     Elapsed = erlang:monotonic_time(millisecond) - Started,
     exit(Server, kill),
@@ -562,7 +564,8 @@ t_backstop_timeout_text_matches_the_native_form(_Config) ->
 t_unusable_timeout_options_fall_back_to_the_default(Config) ->
     Opts = (?conn_opts(Config))#{timeout => <<"15s">>, request_timeout => -1},
     Id = erlang:unique_integer([monotonic, positive]),
-    ok = datalayers_nif:async_connect(self(), Id, 0, Opts),
+    Token = datalayers_nif:new_cancel_token(),
+    ok = datalayers_nif:async_connect(self(), Id, 0, Token, Opts),
     {ok, ClientRef} = receive_async_result_by_id(Id, 10000),
     ?assert(is_reference(ClientRef)),
     ok = datalayers_nif:stop(ClientRef).
@@ -584,12 +587,23 @@ t_queued_requests_expire_without_crashing_the_socket(Config) ->
             ok -> with_thaw_guard(Container, fun() -> frozen_request_backlog(Client) end);
             {error, PauseError} -> {error, PauseError}
         end,
+    %% Recovery has to mean more than "the inflight entries were dropped": the
+    %% same socket must work again once the server is back.
+    Recovered =
+        case Result of
+            ok ->
+                {ok, [[<<"1">>]]} = datalayers:execute(Client, <<"SELECT 1">>),
+                ok;
+            _ ->
+                skipped
+        end,
     ok = datalayers:stop(Client),
     case Result of
         {error, Reason} ->
             {skip, lists:flatten(io_lib:format("cannot pause the container: ~s", [Reason]))};
-        Other ->
-            Other
+        ok ->
+            ?assertEqual(ok, Recovered),
+            ok
     end.
 
 frozen_request_backlog(Client) ->
@@ -598,7 +612,7 @@ frozen_request_backlog(Client) ->
     Sqls = [iolist_to_binary(io_lib:format("SELECT ~p", [N])) || N <- lists:seq(1, Count)],
     lists:foreach(
         fun(Sql) ->
-            {ok, _} = datalayers:async_execute(Client, Sql, async_reply_fun(Parent))
+            ok = datalayers:async_execute(Client, Sql, async_reply_fun(Parent))
         end,
         Sqls
     ),
@@ -665,6 +679,25 @@ t_second_connect_while_connecting_is_rejected(_Config) ->
     {error, _} = receive_tagged(connect_result, 6000),
     exit(Server, kill),
     _ = catch datalayers_sock:stop(Sock),
+    ok.
+
+%% Stopping a socket while a connect is still in progress must cancel the native
+%% attempt instead of letting it run until its budget: the peer sees the hang-up.
+t_stopping_during_connect_cancels_the_attempt(_Config) ->
+    {Server, Port} = silent_server_reporting_close(self()),
+    Opts = silent_conn_opts(Port, 60000),
+    {ok, Sock} = datalayers_sock:start(),
+    Self = self(),
+    _Caller = spawn(fun() ->
+        Self ! {connect_result, datalayers_sock:sync_command(Sock, connect, [Opts])}
+    end),
+    %% Let the TCP connection come up (the peer stays silent, so the handshake
+    %% hangs), then stop: the attempt must give up long before the 60s budget.
+    ct:sleep(200),
+    ok = datalayers_sock:stop(Sock),
+    _ = receive_tagged(connect_result, 2000),
+    ?assertEqual({error, closed}, receive_tagged(peer_result, 5000)),
+    exit(Server, kill),
     ok.
 
 %% ================================================================================
@@ -739,7 +772,8 @@ receive_async_result(Timeout) ->
 %% so tests can drive the async NIF entry points without a socket process.
 connect_client_ref(Config) ->
     Id = erlang:unique_integer([monotonic, positive]),
-    ok = datalayers_nif:async_connect(self(), Id, 0, ?conn_opts(Config)),
+    Token = datalayers_nif:new_cancel_token(),
+    ok = datalayers_nif:async_connect(self(), Id, 0, Token, ?conn_opts(Config)),
     receive
         {datalayers_async_result, Id, {ok, Ref}} when is_reference(Ref) ->
             Ref;
@@ -841,6 +875,39 @@ hold_connections(Listen, Held) ->
             hold_connections(Listen, Held);
         {error, _} ->
             ok
+    end.
+
+%% Like silent_server/0, but the acceptor also watches whether the client hangs
+%% up and reports the read result, so a test can tell "the native attempt gave up"
+%% from "it is still running".
+silent_server_reporting_close(Parent) ->
+    Server =
+        spawn(fun() ->
+            {ok, Listen} = gen_tcp:listen(0, [
+                binary, {active, false}, {reuseaddr, true}, {ip, {127, 0, 0, 1}}
+            ]),
+            {ok, Port} = inet:port(Listen),
+            Parent ! {silent_server, self(), Port},
+            Result =
+                case gen_tcp:accept(Listen, 5000) of
+                    {ok, Socket} -> drain_until_closed(Socket, 20000);
+                    {error, Reason} -> {error, Reason}
+                end,
+            Parent ! {peer_result, Result}
+        end),
+    receive
+        {silent_server, Server, Port} -> {Server, Port}
+    after 5000 ->
+        ct:fail("silent server did not start")
+    end.
+
+%% Read (and discard) whatever the peer sends until it hangs up, so the caller
+%% can tell "the attempt gave up" from "it is still running". The client sends the
+%% HTTP/2 connection preface first, so a single read would not see the close.
+drain_until_closed(Socket, Timeout) ->
+    case gen_tcp:recv(Socket, 0, Timeout) of
+        {ok, _Ignored} -> drain_until_closed(Socket, Timeout);
+        {error, _} = Error -> Error
     end.
 
 assert_never_inside_nif(_Sock, 0, _SleepMs) ->

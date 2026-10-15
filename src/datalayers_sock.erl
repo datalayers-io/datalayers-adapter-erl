@@ -13,6 +13,9 @@
 -record(state, {
     client :: client_ref() | undefined,
     opts :: opts() | undefined,
+    %% cancellation signal for this socket: it exists before a connection does, so
+    %% a connect that is still in progress can be given up on stop as well
+    token :: reference() | undefined,
     %% Whole-request deadline in milliseconds, taken from the connect options.
     request_timeout = ?DEFAULT_REQUEST_TIMEOUT_MS :: pos_integer(),
     %% id of the request currently in flight. There is at most one per connection,
@@ -77,7 +80,7 @@ start_link() ->
     gen_server:start_link(?MODULE, [], []).
 
 init([]) ->
-    {ok, #state{client = undefined, opts = undefined}}.
+    {ok, #state{client = undefined, opts = undefined, token = ?NIF_MODULE:new_cancel_token()}}.
 
 %% `current = undefined` means nothing is queued or in flight, so this socket
 %% has never been asked to connect before. Without it a second `connect` issued
@@ -90,7 +93,7 @@ handle_call(
     State = #state{client = undefined, current = undefined}
 ) ->
     State1 = State#state{opts = Opts, request_timeout = request_timeout(Opts)},
-    {noreply, enqueue(connect, [Opts], {reply, From}, State1)};
+    {noreply, enqueue(connect, [State1#state.token, Opts], {reply, From}, State1)};
 handle_call(?REQ(connect, _Args), _From, State) ->
     %% Already connected, or a connect request is still queued or in flight.
     {reply, {error, already_connected}, State};
@@ -144,6 +147,13 @@ handle_info(_, State) ->
     {noreply, State}.
 
 handle_cast(stop, State = #state{client = ClientRef, current = Current, pending = Pending}) ->
+    %% Cancel first: a connect that is still in progress has no client resource
+    %% yet, and an established connection stops its in-flight operation promptly
+    %% instead of running until its deadline.
+    case State#state.token of
+        undefined -> ok;
+        Token -> _ = ?NIF_MODULE:cancel(Token)
+    end,
     case is_reference(ClientRef) of
         true ->
             %% Fire and forget: `stop/1` drops the client (closing its channel) on
@@ -309,8 +319,8 @@ cancel_when_down(SockPid, ClientRef) ->
             ok
     end.
 
-apply_async_nif(connect, [Opts], _ClientRef, ReplyPid, Id, TimeoutMs) ->
-    ?NIF_MODULE:async_connect(ReplyPid, Id, TimeoutMs, Opts);
+apply_async_nif(connect, [Token, Opts], _ClientRef, ReplyPid, Id, TimeoutMs) ->
+    ?NIF_MODULE:async_connect(ReplyPid, Id, TimeoutMs, Token, Opts);
 apply_async_nif(use_database, [Database], ClientRef, ReplyPid, Id, TimeoutMs) ->
     ?NIF_MODULE:async_use_database(ReplyPid, Id, TimeoutMs, ClientRef, Database);
 apply_async_nif(execute, [Sql], ClientRef, ReplyPid, Id, TimeoutMs) ->

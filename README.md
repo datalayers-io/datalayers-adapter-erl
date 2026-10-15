@@ -125,13 +125,13 @@ ok = datalayers:close_prepared(Client, PreparedStatement).
 
 ### Asynchronous Operations
 
-The library also provides asynchronous versions of `execute`, `prepare`, and `execute_prepare`. They return immediately with `{ok, Client}` — `Client` is the socket process, which the caller can monitor — and deliver the result to the callback instead.
+The library also provides asynchronous versions of `execute`, `prepare`, and `execute_prepare`. They return immediately and deliver the result to the callback instead.
 
-The callback is invoked as `CallbackFun(CallbackArgs ++ [Result])`, where `Result` is `{ok, Value}` or `{error, Reason}`.
+The callback is invoked as `CallbackFun(CallbackArgs ++ [Result])`, where `Result` is `{ok, Value}` or `{error, Reason}` (including `{error, {not_dispatched, Reason}}`, see [Errors](#errors)).
 
 ```erlang
 Callback = {fun(Result) -> io:format("Result: ~p~n", [Result]) end, []},
-{ok, _} = datalayers:async_execute(Client, <<"SELECT * FROM my_table">>, Callback).
+ok = datalayers:async_execute(Client, <<"SELECT * FROM my_table">>, Callback).
 ```
 
 ### Stopping the Client

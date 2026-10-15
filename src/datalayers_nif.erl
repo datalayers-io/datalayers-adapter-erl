@@ -1,7 +1,7 @@
 -module(datalayers_nif).
 
 -export([
-    async_connect/4,
+    async_connect/5,
     async_use_database/5,
     async_execute/5,
     async_prepare/6,
@@ -9,6 +9,9 @@
     async_close_prepared/5,
 
     stop/1,
+
+    new_cancel_token/0,
+    cancel/1,
 
     set_max_in_flight/1
 ]).
@@ -56,7 +59,7 @@ configure() ->
 %% the connection's own default". No NIF blocks the calling process, so a stalled
 %% server can not pin a BEAM scheduler thread.
 
-async_connect(_ReplyPid, _Id, _TimeoutMs, _Opts) ->
+async_connect(_ReplyPid, _Id, _TimeoutMs, _Token, _Opts) ->
     not_loaded(?LINE).
 
 async_use_database(_ReplyPid, _Id, _TimeoutMs, _Client, _Database) ->
@@ -75,6 +78,12 @@ async_close_prepared(_ReplyPid, _Id, _TimeoutMs, _Client, _Statement) ->
     not_loaded(?LINE).
 
 stop(_Client) ->
+    not_loaded(?LINE).
+
+new_cancel_token() ->
+    not_loaded(?LINE).
+
+cancel(_Token) ->
     not_loaded(?LINE).
 
 set_max_in_flight(_Value) ->

@@ -8,6 +8,7 @@ mod resource;
 mod types;
 mod util;
 
+use crate::resource::CancelToken;
 use crate::resource::{ClientResource, PreparedStatementResource};
 use arrow_array::RecordBatch;
 use arrow_flight::sql::client::PreparedStatement;
@@ -46,7 +47,27 @@ lazy_static! {
 pub fn on_load(env: Env, _load_info: Term) -> bool {
     let _ = env.register::<ClientResource>();
     let _ = env.register::<PreparedStatementResource>();
+    let _ = env.register::<CancelToken>();
     true
+}
+
+/// Create the cancellation signal a socket holds for its connection attempt.
+#[rustler::nif]
+fn new_cancel_token() -> ResourceArc<CancelToken> {
+    CancelToken::new()
+}
+
+/// Cancel whatever the token was handed to: an in-progress connect, or the
+/// connection it produced.
+#[rustler::nif]
+fn cancel(token_ref: Reference) -> rustler::Atom {
+    match token_ref.decode::<ResourceArc<CancelToken>>() {
+        Ok(token) => {
+            token.cancel();
+            ok()
+        }
+        Err(_) => error(),
+    }
 }
 
 // =============================================================================
@@ -295,6 +316,7 @@ fn async_connect<'a>(
     reply_pid: LocalPid,
     id: i64,
     timeout_ms: u64,
+    token_ref: Reference<'a>,
     opts: ClientOpts,
 ) -> NifResult<Term<'a>> {
     let deadline = request_deadline(timeout_ms, opts.request_timeout());
@@ -302,11 +324,20 @@ fn async_connect<'a>(
     // connect attempt's budget: a connect that used 10s of a 15s budget must not
     // leave every later operation with 5s.
     let default_timeout = opts.request_timeout();
-    // A connection that is still being set up has no resource to cancel yet; its
-    // own budget bounds it.
-    submit(reply_pid, id, deadline, None, async move {
+    let token: ResourceArc<CancelToken> = match token_ref.decode() {
+        Ok(token) => token,
+        Err(_) => return Ok((error(), "invalid_cancel_token").encode(env)),
+    };
+    // Same channel for the connect attempt and, once it succeeds, for every
+    // operation on the connection it produced.
+    let cancel = token.sender().subscribe();
+    submit(reply_pid, id, deadline, Some(cancel), async move {
         match Client::try_new(&opts).await {
-            Ok(client) => AsyncPayload::Connected(ClientResource::new(client, default_timeout)),
+            Ok(client) => AsyncPayload::Connected(ClientResource::new(
+                client,
+                default_timeout,
+                token.sender(),
+            )),
             Err(e) => AsyncPayload::Error(format!("{e:#}")),
         }
     });

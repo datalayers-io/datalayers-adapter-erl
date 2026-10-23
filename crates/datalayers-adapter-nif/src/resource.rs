@@ -1,5 +1,7 @@
 use arrow_flight::sql::client::PreparedStatement;
+use arrow_schema::Schema;
 use rustler::ResourceArc;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, watch};
 use tonic::transport::Channel;
@@ -77,6 +79,7 @@ impl CancelToken {
 /// A resource that holds a prepared statement for executing SQL queries.
 pub struct PreparedStatementResource {
     pub inner: Mutex<Option<PreparedStatement<Channel>>>,
+    pub parameter_schema: Arc<Schema>,
     pub sql: String,
     pub auto_rebuild: bool,
 }
@@ -86,11 +89,13 @@ impl rustler::Resource for PreparedStatementResource {}
 impl PreparedStatementResource {
     pub fn new(
         statement: PreparedStatement<Channel>,
+        parameter_schema: Arc<Schema>,
         sql: String,
         auto_rebuild: bool,
     ) -> ResourceArc<Self> {
         ResourceArc::new(Self {
             inner: Mutex::new(Some(statement)),
+            parameter_schema,
             sql,
             auto_rebuild,
         })

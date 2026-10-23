@@ -453,6 +453,41 @@ async fn encode_completion(
     .map_err(|e| AsyncPayload::Error(format!("completion encoding failed: {e}")))
 }
 
+const INLINE_RESULT_CELLS: usize = 256;
+const INLINE_RESULT_BYTES: usize = 8192;
+const INLINE_PAYLOAD_ROWS: usize = 32;
+
+fn result_batch_is_small(batches: &[RecordBatch]) -> bool {
+    batches
+        .iter()
+        .map(|batch| batch.num_rows().saturating_mul(batch.num_columns()))
+        .sum::<usize>()
+        <= INLINE_RESULT_CELLS
+}
+
+fn payload_is_small(payload: &AsyncPayload) -> bool {
+    match payload {
+        AsyncPayload::Rows(rows) => {
+            let bytes = rows
+                .iter()
+                .flat_map(|row| row.iter())
+                .map(String::len)
+                .sum::<usize>();
+            rows.len() <= INLINE_PAYLOAD_ROWS && bytes <= INLINE_RESULT_BYTES
+        }
+        _ => true,
+    }
+}
+
+fn encode_completion_inline(
+    id: i64,
+    payload: AsyncPayload,
+) -> Result<EncodedCompletion, AsyncPayload> {
+    let env = OwnedEnv::new();
+    let message = env.save(CompletionMessage { id, payload });
+    Ok(EncodedCompletion { env, message })
+}
+
 /// Run one request and encode its completion while the in-flight slot is still
 /// held. A late encode never sends its success message: only a fully encoded
 /// result may leave here before the request deadline.
@@ -471,11 +506,14 @@ where
     let Some(remaining) = deadline.remaining() else {
         return Err(deadline_failure(deadline, dispatched).expect("the deadline expired"));
     };
-    let encoded = match tokio::time::timeout(remaining, encode_completion(reply_id, payload)).await
-    {
-        Ok(encoded) => encoded?,
-        Err(_) => {
-            return Err(deadline_failure(deadline, dispatched).expect("the deadline expired"));
+    let encoded = if payload_is_small(&payload) {
+        encode_completion_inline(reply_id, payload)?
+    } else {
+        match tokio::time::timeout(remaining, encode_completion(reply_id, payload)).await {
+            Ok(encoded) => encoded?,
+            Err(_) => {
+                return Err(deadline_failure(deadline, dispatched).expect("the deadline expired"));
+            }
         }
     };
     if let Some(err) = deadline_failure(deadline, dispatched) {
@@ -702,11 +740,15 @@ fn async_prepare<'a>(
                 Some(client) => {
                     work_dispatched.store(true, Ordering::Relaxed);
                     match client.prepare(&sql).await {
-                        Ok(statement) => AsyncPayload::Prepared(PreparedStatementResource::new(
-                            statement,
-                            sql,
-                            auto_rebuild,
-                        )),
+                        Ok(statement) => match parameter_schema(&statement) {
+                            Ok(schema) => AsyncPayload::Prepared(PreparedStatementResource::new(
+                                statement,
+                                schema,
+                                sql,
+                                auto_rebuild,
+                            )),
+                            Err(err) => err,
+                        },
                         Err(e) => AsyncPayload::Error(format!("{e:#}")),
                     }
                 }
@@ -742,13 +784,40 @@ fn async_execute_prepare<'a>(
             Err(_) => return Ok((error(), "invalid_statement_resource").encode(env)),
         };
     let deadline = RequestDeadline::new(request, client_resource.request_timeout);
-
-    // Only the term copy happens on the BEAM scheduler. Locking the resources and
-    // converting the parameter matrix into an Arrow `RecordBatch` both scale with
-    // the input size, so they happen on the task thread; the parameters travel
-    // there through an owned environment.
-    let owned_env = OwnedEnv::new();
-    let saved_params = owned_env.save(params);
+    if deadline.remaining().is_none() {
+        return Ok((
+            error(),
+            (
+                not_dispatched(),
+                format!(
+                    "[request] timed out after {:?} before dispatch",
+                    deadline.budget
+                ),
+            ),
+        )
+            .encode(env));
+    }
+    let binding =
+        match util::params_to_record_batch(statement_resource.parameter_schema.clone(), params) {
+            Ok(binding) => binding,
+            Err(rustler::Error::BadArg) => return Ok((error(), "badarg").encode(env)),
+            Err(e) => {
+                return Ok((error(), format!("invalid_params: {e:?}")).encode(env));
+            }
+        };
+    if deadline.remaining().is_none() {
+        return Ok((
+            error(),
+            (
+                not_dispatched(),
+                format!(
+                    "[request] timed out after {:?} before dispatch",
+                    deadline.budget
+                ),
+            ),
+        )
+            .encode(env));
+    }
 
     let cancel = client_resource.cancel.subscribe();
     let dispatched = Arc::new(AtomicBool::new(false));
@@ -765,8 +834,6 @@ fn async_execute_prepare<'a>(
                 return AsyncPayload::Error("client_or_statement_stopped".to_string());
             };
             let mut statement_guard = statement_resource.inner.lock().await;
-            let mut owned_env = owned_env;
-            let mut saved_params = saved_params;
 
             // `close_prepared/1` takes the statement out of the resource; rebuild it when
             // the caller asked for auto_rebuild, exactly like the synchronous path does.
@@ -779,22 +846,10 @@ fn async_execute_prepare<'a>(
                 work_dispatched.store(true, Ordering::Relaxed);
                 return match client.prepare(&statement_resource.sql).await {
                     Ok(mut new_statement) => {
-                        let schema = match parameter_schema(&new_statement) {
-                            Ok(schema) => schema,
-                            Err(err) => return err,
-                        };
-                        let converted =
-                            match binding_from_saved(owned_env, saved_params, schema).await {
-                                Ok(converted) => converted,
-                                Err(err) => return err,
-                            };
                         if let Some(err) = deadline_failure(deadline, &work_dispatched) {
                             return err;
                         }
-                        match client
-                            .execute_prepared(&mut new_statement, converted.binding)
-                            .await
-                        {
+                        match client.execute_prepared(&mut new_statement, binding).await {
                             Ok(batches) => {
                                 *statement_guard = Some(new_statement);
                                 convert_result_batches(batches, deadline, &work_dispatched).await
@@ -809,26 +864,11 @@ fn async_execute_prepare<'a>(
                 Some(statement) => statement,
                 None => return AsyncPayload::Error("client_or_statement_stopped".to_string()),
             };
-
-            let schema = match parameter_schema(statement) {
-                Ok(schema) => schema,
-                Err(err) => return err,
-            };
-            let converted = match binding_from_saved(owned_env, saved_params, schema).await {
-                Ok(converted) => converted,
-                Err(err) => return err,
-            };
-            let ConvertedBinding {
-                owned_env: returned_env,
-                saved_params: returned_params,
-                binding,
-            } = converted;
-            owned_env = returned_env;
-            saved_params = returned_params;
             if let Some(err) = deadline_failure(deadline, &work_dispatched) {
                 return err;
             }
             work_dispatched.store(true, Ordering::Relaxed);
+            let retry_binding = statement_resource.auto_rebuild.then(|| binding.clone());
 
             match client.execute_prepared(statement, binding).await {
                 Ok(batches) => convert_result_batches(batches, deadline, &work_dispatched).await,
@@ -839,21 +879,13 @@ fn async_execute_prepare<'a>(
                         }
                         match client.prepare(&statement_resource.sql).await {
                             Ok(mut new_statement) => {
-                                let schema = match parameter_schema(&new_statement) {
-                                    Ok(schema) => schema,
-                                    Err(err) => return err,
-                                };
-                                let converted =
-                                    match binding_from_saved(owned_env, saved_params, schema).await
-                                    {
-                                        Ok(converted) => converted,
-                                        Err(err) => return err,
-                                    };
                                 if let Some(err) = deadline_failure(deadline, &work_dispatched) {
                                     return err;
                                 }
+                                let retry_binding =
+                                    retry_binding.expect("auto_rebuild has a retry binding");
                                 match client
-                                    .execute_prepared(&mut new_statement, converted.binding)
+                                    .execute_prepared(&mut new_statement, retry_binding)
                                     .await
                                 {
                                     Ok(batches) => {
@@ -963,6 +995,10 @@ async fn convert_result_batches(
     if let Some(err) = deadline_failure(deadline, dispatched) {
         return err;
     }
+    if result_batch_is_small(&batches) {
+        let rows = util::record_batch_to_term(&batches);
+        return deadline_failure(deadline, dispatched).unwrap_or_else(|| AsyncPayload::Rows(rows));
+    }
     let permit = match conversion_limiter().clone().acquire_owned().await {
         Ok(permit) => permit,
         Err(_) => {
@@ -980,48 +1016,6 @@ async fn convert_result_batches(
         }
         Err(e) => AsyncPayload::Error(format!("result conversion failed: {e}")),
     }
-}
-
-struct ConvertedBinding {
-    owned_env: OwnedEnv,
-    saved_params: SavedTerm,
-    binding: RecordBatch,
-}
-
-/// Build the Arrow binding on a bounded blocking worker.
-///
-/// The conversion permit moves into the blocking closure, so dropping a timed-out
-/// request future does not let the still-running conversion consume an unbounded
-/// number of blocking threads.
-async fn binding_from_saved(
-    owned_env: OwnedEnv,
-    saved_params: SavedTerm,
-    schema: Arc<Schema>,
-) -> Result<ConvertedBinding, AsyncPayload> {
-    let permit = conversion_limiter()
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|_| AsyncPayload::Error("parameter conversion limiter closed".to_string()))?;
-
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        let binding = owned_env.run(|env| {
-            let params = saved_params.load(env);
-            match util::params_to_record_batch(schema, params) {
-                Ok(binding) => Ok(binding),
-                Err(rustler::Error::BadArg) => Err(AsyncPayload::Error("badarg".to_string())),
-                Err(e) => Err(AsyncPayload::Error(format!("invalid_params: {e:?}"))),
-            }
-        })?;
-        Ok(ConvertedBinding {
-            owned_env,
-            saved_params,
-            binding,
-        })
-    })
-    .await
-    .map_err(|e| AsyncPayload::Error(format!("parameter conversion failed: {e}")))?
 }
 
 #[cfg(test)]

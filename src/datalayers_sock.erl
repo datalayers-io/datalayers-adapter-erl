@@ -46,7 +46,10 @@
     remaining_budget/1,
 
     %% Exported for tests: the textual form of a request budget.
-    budget_text/1
+    budget_text/1,
+
+    %% Exported for tests: verify backstop timer ordering around submission.
+    submit_with_backstop/4
 ]).
 
 %% gen_server callbacks
@@ -254,19 +257,20 @@ maybe_dispatch(State = #state{current = undefined, queue = Queue}) ->
         {{value, {Id, Func, Args, Deadline}}, Queue1} ->
             State1 = State#state{queue = Queue1, current = Id},
             case remaining_budget(Deadline) of
-                {ok, Remaining} ->
-                    Timer = erlang:send_after(
-                        Remaining + ?BACKSTOP_MARGIN_MS, self(), {request_expired, Id}
-                    ),
-                    State2 = State1#state{timer = Timer},
-                    Request = {Deadline, State2#state.request_timeout},
-                    case apply_async_nif(Func, Args, State2#state.client, self(), Id, Request) of
-                        ok ->
-                            State2;
+                {ok, _Remaining} ->
+                    Request = {Deadline, State1#state.request_timeout},
+                    Submit = fun() ->
+                        apply_async_nif(
+                            Func, Args, State1#state.client, self(), Id, Request
+                        )
+                    end,
+                    case submit_with_backstop(Submit, Id, Deadline, ?BACKSTOP_MARGIN_MS) of
+                        {ok, Timer} ->
+                            State1#state{timer = Timer};
                         {error, Reason} ->
                             %% Submission rejected (e.g. a stale resource reference);
                             %% finish the request now so the caller is not left waiting.
-                            maybe_dispatch(complete(Id, {error, Reason}, State2))
+                            maybe_dispatch(complete(Id, {error, Reason}, State1))
                     end;
                 expired ->
                     %% It never reached the server.
@@ -288,6 +292,16 @@ remaining_budget(Deadline) ->
     case Deadline - erlang:monotonic_time(millisecond) of
         Remaining when Remaining > 0 -> {ok, Remaining};
         _ -> expired
+    end.
+
+submit_with_backstop(Submit, Id, Deadline, Margin) when is_function(Submit, 0) ->
+    case Submit() of
+        ok ->
+            Delay = max(0, Deadline - erlang:monotonic_time(millisecond)) + Margin,
+            Timer = erlang:send_after(Delay, self(), {request_expired, Id}),
+            {ok, Timer};
+        {error, Reason} ->
+            {error, Reason}
     end.
 
 %% The native side reports its budget the way Rust formats a `Duration`

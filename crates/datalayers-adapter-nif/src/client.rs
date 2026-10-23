@@ -355,7 +355,8 @@ mod tests {
             Duration::from_millis(200),
         );
         let dispatched = std::sync::atomic::AtomicBool::new(false);
-        let out = crate::run_bounded(deadline, &Semaphore::new(4), &dispatched, async move {
+        let permits = Semaphore::new(4);
+        let out = crate::run_bounded(deadline, &permits, &dispatched, async move {
             match Client::try_new(&opts, || {}).await {
                 Ok(_) => AsyncPayload::Closed,
                 Err(e) => AsyncPayload::Error(format!("{e:#}")),
@@ -366,7 +367,7 @@ mod tests {
         let _ = std::fs::remove_file(&fifo);
         let _ = std::fs::remove_dir(&dir);
 
-        match out {
+        match out.payload {
             // The certificate is read before the endpoint can receive a request.
             AsyncPayload::NotDispatched(msg) => {
                 assert!(msg.contains("timed out after"), "unexpected error: {msg}");
@@ -411,7 +412,8 @@ mod tests {
                 Duration::from_millis(50),
             );
             let dispatched = std::sync::atomic::AtomicBool::new(false);
-            let _ = crate::run_bounded(deadline, &Semaphore::new(16), &dispatched, async {
+            let permits = Semaphore::new(16);
+            let _ = crate::run_bounded(deadline, &permits, &dispatched, async {
                 match super::read_file(&path).await {
                     Ok(_) => AsyncPayload::Closed,
                     Err(e) => AsyncPayload::Error(format!("{e:#}")),

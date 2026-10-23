@@ -9,11 +9,11 @@ numbers for a human to read.
 
 ## What it measures
 
-`async_execute_prepare/6` is the one NIF whose body does work that scales with the
-caller's input: it copies the whole parameter term into an owned environment
-(`OwnedEnv::save`) before submitting. That NIF runs on a dirty CPU scheduler, so
-the copy occupies a dirty CPU scheduler thread and blocks only the calling
-process; the caller's normal scheduler stays free.
+The harness targets `async_execute_prepare/6`, whose body copies the whole
+parameter term into an owned environment (`OwnedEnv::save`) before submitting.
+That NIF runs on a dirty CPU scheduler, so the copy occupies a dirty CPU scheduler
+thread and blocks only the calling process; the caller's normal scheduler stays
+free.
 
 The harness reports both sides of that:
 
@@ -27,13 +27,20 @@ The harness reports both sides of that:
 
 ## How to run it
 
-Start a Datalayers instance and build the library first (`rebar3 compile`), then:
+Start a Datalayers instance and compile the test profile first:
 
 ```bash
+rebar3 ct --compile_only
+
 export DATALAYERS_TCP_ADDR=172.100.100.10
-erl +S 1 -noshell -pa _build/test/lib/datalayers/ebin \
+erl +S 1 -noshell \
+    -pa _build/test/lib/datalayers/ebin \
+    -pa _build/test/lib/datalayers/test \
     -run nif_save_bench main -s init stop
 ```
+
+`--compile_only` is required because `nif_save_bench` lives in `test/`; the
+default `rebar3 compile` profile does not put its BEAM file on the code path.
 
 `+S 1` puts the heartbeat and the caller on one normal scheduler, which is the
 arrangement its gap column measures; drop it to run with the normal scheduler

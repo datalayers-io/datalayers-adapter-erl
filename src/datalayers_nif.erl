@@ -34,6 +34,9 @@ init() ->
 %% and can not be changed at runtime. An unusable value (or no value at all) is
 %% replaced by the library's default.
 configure() ->
+    %% Loading the NIF does not imply that the application spec is loaded. Read
+    %% the documented sys.config value before the limiter is materialised.
+    _ = application:load(datalayers),
     Value =
         case application:get_env(datalayers, max_in_flight) of
             %% Anything that is not an integer is treated as "not set"; the

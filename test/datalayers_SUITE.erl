@@ -79,6 +79,7 @@ groups() ->
         t_nif_rejects_expired_work_before_dispatch,
         t_max_in_flight_cannot_be_changed_at_runtime,
         t_expired_queue_budget_is_not_confused_with_a_budget,
+        t_backstop_starts_after_submission,
         t_backstop_timeout_text_matches_the_native_form,
         t_unusable_timeout_options_fall_back_to_the_default,
         t_out_of_range_request_timeout_falls_back,
@@ -596,6 +597,30 @@ t_expired_queue_budget_is_not_confused_with_a_budget(_Config) ->
     ?assertEqual(
         expired, datalayers_sock:remaining_budget(erlang:monotonic_time(millisecond) - 1)
     ),
+    ok.
+
+%% Submission can stay inside a NIF longer than the deadline and margin. The
+%% backstop must not already be queued when that submission finally returns.
+t_backstop_starts_after_submission(_Config) ->
+    Id = erlang:unique_integer([positive]),
+    Deadline = erlang:monotonic_time(millisecond) + 1,
+    {ok, Timer} =
+        datalayers_sock:submit_with_backstop(
+            fun() ->
+                timer:sleep(30),
+                ok
+            end,
+            Id,
+            Deadline,
+            5
+        ),
+    receive
+        {request_expired, Id} ->
+            ct:fail("backstop fired before NIF submission returned")
+    after 0 ->
+        ok
+    end,
+    _ = erlang:cancel_timer(Timer),
     ok.
 
 %% The backstop answers the same condition the native side reports, so it has to

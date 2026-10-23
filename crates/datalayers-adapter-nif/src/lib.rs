@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::{Semaphore, SemaphorePermit, watch};
 use tonic::transport::Channel;
 
 fn is_prepared_statement_lost(err: &anyhow::Error) -> bool {
@@ -105,7 +105,7 @@ enum AsyncPayload {
 }
 
 impl AsyncPayload {
-    fn encode<'a>(self, env: Env<'a>) -> Term<'a> {
+    fn encode<'a>(&self, env: Env<'a>) -> Term<'a> {
         match self {
             AsyncPayload::Rows(rows) => (ok(), rows).encode(env),
             AsyncPayload::Prepared(resource) => (ok(), resource).encode(env),
@@ -118,6 +118,22 @@ impl AsyncPayload {
             }
         }
     }
+}
+
+struct CompletionMessage {
+    id: i64,
+    payload: AsyncPayload,
+}
+
+impl Encoder for CompletionMessage {
+    fn encode<'a>(&self, env: Env<'a>) -> Term<'a> {
+        (datalayers_async_result(), self.id, self.payload.encode(env)).encode(env)
+    }
+}
+
+struct EncodedCompletion {
+    env: OwnedEnv,
+    message: SavedTerm,
 }
 
 /// Cap used when the application environment does not configure a usable one.
@@ -143,7 +159,8 @@ const MAX_MAX_IN_FLIGHT: i64 = 1_000_000;
 /// environment, and can not be changed at runtime.
 static IN_FLIGHT_CAPACITY: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_IN_FLIGHT);
 static IN_FLIGHT_LIMITER: OnceLock<Semaphore> = OnceLock::new();
-static BINDING_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
+/// CPU-heavy parameter and result conversions share one process-wide bound.
+static CONVERSION_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 /// Decide the process-wide cap from a configured value.
 ///
@@ -172,15 +189,18 @@ fn in_flight_limiter() -> &'static Semaphore {
         .get_or_init(|| Semaphore::new(clamp_permits(IN_FLIGHT_CAPACITY.load(Ordering::Relaxed))))
 }
 
-fn binding_capacity() -> usize {
+fn conversion_capacity() -> usize {
     std::thread::available_parallelism()
         .map(|parallelism| parallelism.get())
         .unwrap_or(1)
         .clamp(1, 16)
 }
 
-fn binding_limiter() -> &'static Arc<Semaphore> {
-    BINDING_LIMITER.get_or_init(|| Arc::new(Semaphore::new(binding_capacity())))
+/// A bounded blocking pool for CPU conversion work. A permit is moved into the
+/// blocking closure, so abandoned requests can not pile up conversions without
+/// bound after their runtime futures are dropped.
+fn conversion_limiter() -> &'static Arc<Semaphore> {
+    CONVERSION_LIMITER.get_or_init(|| Arc::new(Semaphore::new(conversion_capacity())))
 }
 
 /// Configure the process-wide in-flight cap. Called once, when the module is
@@ -280,23 +300,34 @@ fn pre_dispatch_timeout(deadline: RequestDeadline) -> AsyncPayload {
     ))
 }
 
+/// A payload together with the in-flight permit that must cover final encoding.
+struct BoundedPayload<'a> {
+    payload: AsyncPayload,
+    /// Keeping this guard in the result holds the request slot through final
+    /// result encoding.
+    _permit: Option<SemaphorePermit<'a>>,
+}
+
 /// Run `work` under the process-wide in-flight cap and the whole-request deadline.
 ///
 /// The deadline bounds the *entire* request, including the wait for an in-flight
 /// slot, so a request can never hold -- or wait for -- a slot for longer than
 /// that. The per-stage timeouts inside `Client` (`timed`) still bound each
 /// individual await.
-async fn run_bounded<F>(
+async fn run_bounded<'a, F>(
     deadline: RequestDeadline,
-    permits: &Semaphore,
+    permits: &'a Semaphore,
     dispatched: &AtomicBool,
     work: F,
-) -> AsyncPayload
+) -> BoundedPayload<'a>
 where
     F: std::future::Future<Output = AsyncPayload>,
 {
     let Some(remaining) = deadline.remaining() else {
-        return pre_dispatch_timeout(deadline);
+        return BoundedPayload {
+            payload: pre_dispatch_timeout(deadline),
+            _permit: None,
+        };
     };
 
     // Waiting for a slot is not dispatched work: report it as such so the caller
@@ -304,18 +335,27 @@ where
     let permit = match tokio::time::timeout(remaining, permits.acquire()).await {
         Ok(Ok(permit)) => permit,
         Ok(Err(_)) => {
-            return AsyncPayload::Error("[request] in-flight limiter closed".to_string());
+            return BoundedPayload {
+                payload: AsyncPayload::Error("[request] in-flight limiter closed".to_string()),
+                _permit: None,
+            };
         }
         Err(_) => {
-            return AsyncPayload::NotDispatched(format!(
-                "[request] timed out after {:?} waiting for an in-flight slot",
-                deadline.budget
-            ));
+            return BoundedPayload {
+                payload: AsyncPayload::NotDispatched(format!(
+                    "[request] timed out after {:?} waiting for an in-flight slot",
+                    deadline.budget
+                )),
+                _permit: None,
+            };
         }
     };
 
     let Some(remaining) = deadline.remaining() else {
-        return pre_dispatch_timeout(deadline);
+        return BoundedPayload {
+            payload: pre_dispatch_timeout(deadline),
+            _permit: Some(permit),
+        };
     };
     let payload = match tokio::time::timeout(remaining, work).await {
         Ok(payload) => payload,
@@ -327,8 +367,10 @@ where
             deadline.budget
         )),
     };
-    drop(permit);
-    payload
+    BoundedPayload {
+        payload,
+        _permit: Some(permit),
+    }
 }
 
 /// Run `work` under the request limits, turning a panic into a delivered error.
@@ -336,12 +378,12 @@ where
 /// The task is detached, so a panic would terminate it before any completion was
 /// sent. The socket would keep its single in-flight slot occupied forever and the
 /// connection would look hung, so panics must never escape this point.
-async fn run_guarded<F>(
+async fn run_guarded<'a, F>(
     deadline: RequestDeadline,
-    permits: &Semaphore,
+    permits: &'a Semaphore,
     dispatched: &AtomicBool,
     work: F,
-) -> AsyncPayload
+) -> BoundedPayload<'a>
 where
     F: std::future::Future<Output = AsyncPayload>,
 {
@@ -350,7 +392,10 @@ where
         .await
     {
         Ok(payload) => payload,
-        Err(panic) => AsyncPayload::Error(format!("[request] panicked: {}", panic_message(panic))),
+        Err(panic) => BoundedPayload {
+            payload: AsyncPayload::Error(format!("[request] panicked: {}", panic_message(panic))),
+            _permit: None,
+        },
     }
 }
 
@@ -369,20 +414,86 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 /// Cancelling cannot undo a request the server has already accepted, so the
 /// failure is deliberately an ordinary one: the caller must not treat it as safe
 /// to retry.
-async fn cancellable<F>(mut cancelled: watch::Receiver<bool>, work: F) -> AsyncPayload
+async fn cancellable<F, T>(mut cancelled: watch::Receiver<bool>, work: F) -> Result<T, AsyncPayload>
 where
-    F: std::future::Future<Output = AsyncPayload>,
+    F: std::future::Future<Output = T>,
 {
     if *cancelled.borrow() {
-        return AsyncPayload::Error("[request] cancelled: the socket was stopped".to_string());
+        return Err(AsyncPayload::Error(
+            "[request] cancelled: the socket was stopped".to_string(),
+        ));
     }
     tokio::select! {
         biased;
         _ = cancelled.changed() => {
-            AsyncPayload::Error("[request] cancelled: the socket was stopped".to_string())
+            Err(AsyncPayload::Error(
+                "[request] cancelled: the socket was stopped".to_string()
+            ))
         }
-        payload = work => payload,
+        payload = work => Ok(payload),
     }
+}
+
+async fn encode_completion(
+    id: i64,
+    payload: AsyncPayload,
+) -> Result<EncodedCompletion, AsyncPayload> {
+    let permit = conversion_limiter()
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| AsyncPayload::Error("completion encoder closed".to_string()))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let env = OwnedEnv::new();
+        let message = env.save(CompletionMessage { id, payload });
+        EncodedCompletion { env, message }
+    })
+    .await
+    .map_err(|e| AsyncPayload::Error(format!("completion encoding failed: {e}")))
+}
+
+/// Run one request and encode its completion while the in-flight slot is still
+/// held. A late encode never sends its success message: only a fully encoded
+/// result may leave here before the request deadline.
+async fn run_and_encode<F>(
+    reply_id: i64,
+    deadline: RequestDeadline,
+    permits: &Semaphore,
+    dispatched: &AtomicBool,
+    work: F,
+) -> Result<EncodedCompletion, AsyncPayload>
+where
+    F: std::future::Future<Output = AsyncPayload>,
+{
+    let bounded = run_guarded(deadline, permits, dispatched, work).await;
+    let BoundedPayload { payload, _permit } = bounded;
+    let Some(remaining) = deadline.remaining() else {
+        return Err(deadline_failure(deadline, dispatched).expect("the deadline expired"));
+    };
+    let encoded = match tokio::time::timeout(remaining, encode_completion(reply_id, payload)).await
+    {
+        Ok(encoded) => encoded?,
+        Err(_) => {
+            return Err(deadline_failure(deadline, dispatched).expect("the deadline expired"));
+        }
+    };
+    if let Some(err) = deadline_failure(deadline, dispatched) {
+        return Err(err);
+    }
+    Ok(encoded)
+}
+
+fn send_encoded(reply_pid: &LocalPid, encoded: EncodedCompletion) {
+    let EncodedCompletion { mut env, message } = encoded;
+    let _ = env.send_and_clear(reply_pid, |env| message.load(env));
+}
+
+fn send_payload(reply_pid: &LocalPid, id: i64, payload: AsyncPayload) {
+    let mut env = OwnedEnv::new();
+    let _ = env.send_and_clear(reply_pid, |env| {
+        CompletionMessage { id, payload }.encode(env)
+    });
 }
 
 /// Submit `work` to the shared runtime and deliver its result to `reply_pid`.
@@ -401,19 +512,24 @@ fn submit<F>(
     F: std::future::Future<Output = AsyncPayload> + Send + 'static,
 {
     RT.spawn(async move {
-        let work = run_guarded(deadline, in_flight_limiter(), &dispatched, work);
-        let payload = match cancel {
-            Some(cancelled) => cancellable(cancelled, work).await,
-            None => work.await,
+        let operation = run_and_encode(id, deadline, in_flight_limiter(), &dispatched, work);
+        let result = match cancel {
+            Some(cancelled) => match cancellable(cancelled, operation).await {
+                Ok(result) => result,
+                Err(payload) => Err(payload),
+            },
+            None => operation.await,
         };
-        let mut env = OwnedEnv::new();
-        let _ = env.send_and_clear(&reply_pid, |env| {
-            (datalayers_async_result(), id, payload.encode(env)).encode(env)
-        });
+        match result {
+            Ok(encoded) => send_encoded(&reply_pid, encoded),
+            Err(payload) => send_payload(&reply_pid, id, payload),
+        }
     });
 }
 
-#[rustler::nif]
+// Decoding connect options copies host, credentials, and TLS paths out of the
+// caller's Erlang terms. Keep that work off normal BEAM schedulers.
+#[rustler::nif(schedule = "DirtyCpu")]
 fn async_connect<'a>(
     env: Env<'a>,
     reply_pid: LocalPid,
@@ -456,7 +572,8 @@ fn async_connect<'a>(
     Ok(ok().encode(env))
 }
 
-#[rustler::nif]
+// `Database` is copied out of the caller's binary during NIF decoding.
+#[rustler::nif(schedule = "DirtyCpu")]
 fn async_use_database<'a>(
     env: Env<'a>,
     reply_pid: LocalPid,
@@ -538,7 +655,9 @@ fn async_execute<'a>(
                 Some(client) => {
                     work_dispatched.store(true, Ordering::Relaxed);
                     match client.execute(&sql).await {
-                        Ok(batches) => AsyncPayload::Rows(util::record_batch_to_term(&batches[..])),
+                        Ok(batches) => {
+                            convert_result_batches(batches, deadline, &work_dispatched).await
+                        }
                         Err(e) => AsyncPayload::Error(format!("{e:#}")),
                     }
                 }
@@ -678,7 +797,7 @@ fn async_execute_prepare<'a>(
                         {
                             Ok(batches) => {
                                 *statement_guard = Some(new_statement);
-                                AsyncPayload::Rows(util::record_batch_to_term(&batches[..]))
+                                convert_result_batches(batches, deadline, &work_dispatched).await
                             }
                             Err(e2) => AsyncPayload::Error(format!("{e2:#}")),
                         }
@@ -712,7 +831,7 @@ fn async_execute_prepare<'a>(
             work_dispatched.store(true, Ordering::Relaxed);
 
             match client.execute_prepared(statement, binding).await {
-                Ok(batches) => AsyncPayload::Rows(util::record_batch_to_term(&batches[..])),
+                Ok(batches) => convert_result_batches(batches, deadline, &work_dispatched).await,
                 Err(e) => {
                     if statement_resource.auto_rebuild && is_prepared_statement_lost(&e) {
                         if let Some(err) = deadline_failure(deadline, &work_dispatched) {
@@ -739,7 +858,8 @@ fn async_execute_prepare<'a>(
                                 {
                                     Ok(batches) => {
                                         *statement = new_statement;
-                                        AsyncPayload::Rows(util::record_batch_to_term(&batches[..]))
+                                        convert_result_batches(batches, deadline, &work_dispatched)
+                                            .await
                                     }
                                     Err(e2) => AsyncPayload::Error(format!("{e2:#}")),
                                 }
@@ -832,6 +952,36 @@ fn parameter_schema(statement: &PreparedStatement<Channel>) -> Result<Arc<Schema
         .map_err(|e| AsyncPayload::Error(format!("invalid_params: {e}")))
 }
 
+/// Convert returned Arrow batches on a bounded blocking worker. The conversion
+/// itself is not preemptible, but the runtime future remains cancellable and the
+/// permit stays held until the blocking closure actually finishes.
+async fn convert_result_batches(
+    batches: Vec<RecordBatch>,
+    deadline: RequestDeadline,
+    dispatched: &AtomicBool,
+) -> AsyncPayload {
+    if let Some(err) = deadline_failure(deadline, dispatched) {
+        return err;
+    }
+    let permit = match conversion_limiter().clone().acquire_owned().await {
+        Ok(permit) => permit,
+        Err(_) => {
+            return AsyncPayload::Error("result conversion limiter closed".to_string());
+        }
+    };
+    let converted = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        util::record_batch_to_term(&batches)
+    })
+    .await;
+    match converted {
+        Ok(rows) => {
+            deadline_failure(deadline, dispatched).unwrap_or_else(|| AsyncPayload::Rows(rows))
+        }
+        Err(e) => AsyncPayload::Error(format!("result conversion failed: {e}")),
+    }
+}
+
 struct ConvertedBinding {
     owned_env: OwnedEnv,
     saved_params: SavedTerm,
@@ -848,7 +998,7 @@ async fn binding_from_saved(
     saved_params: SavedTerm,
     schema: Arc<Schema>,
 ) -> Result<ConvertedBinding, AsyncPayload> {
-    let permit = binding_limiter()
+    let permit = conversion_limiter()
         .clone()
         .acquire_owned()
         .await
@@ -877,10 +1027,12 @@ async fn binding_from_saved(
 #[cfg(test)]
 mod tests {
     use super::{
-        AsyncPayload, RequestDeadline, cancellable, clamp_permits, in_flight_limiter,
-        is_prepared_statement_lost, remaining_at, request_budget, resolve_capacity, run_bounded,
-        run_guarded,
+        AsyncPayload, RequestDeadline, cancellable, clamp_permits, convert_result_batches,
+        in_flight_limiter, is_prepared_statement_lost, remaining_at, request_budget,
+        resolve_capacity, run_bounded, run_guarded,
     };
+    use arrow_array::{Int64Array, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
@@ -929,7 +1081,7 @@ mod tests {
             },
         )
         .await;
-        match out {
+        match out.payload {
             AsyncPayload::Error(msg) => {
                 assert!(msg.contains("timed out after"), "unexpected error: {msg}");
             }
@@ -948,7 +1100,7 @@ mod tests {
             async { AsyncPayload::Rows(vec![vec!["ok".to_string()]]) },
         )
         .await;
-        match out {
+        match out.payload {
             AsyncPayload::Rows(rows) => assert_eq!(rows, vec![vec!["ok".to_string()]]),
             _ => panic!("a fast request must run to completion"),
         }
@@ -970,7 +1122,7 @@ mod tests {
             async { AsyncPayload::Closed },
         )
         .await;
-        match blocked {
+        match blocked.payload {
             // It never ran, so the caller may safely retry it.
             AsyncPayload::NotDispatched(msg) => {
                 assert!(msg.contains("in-flight slot"), "unexpected error: {msg}");
@@ -986,7 +1138,7 @@ mod tests {
             async { AsyncPayload::Closed },
         )
         .await;
-        assert!(matches!(allowed, AsyncPayload::Closed));
+        assert!(matches!(allowed.payload, AsyncPayload::Closed));
     }
 
     /// A panic inside the detached task must not swallow the completion: the
@@ -1004,7 +1156,7 @@ mod tests {
             },
         )
         .await;
-        match out {
+        match out.payload {
             AsyncPayload::Error(msg) => {
                 assert!(
                     msg.contains("panicked") && msg.contains("boom"),
@@ -1055,7 +1207,7 @@ mod tests {
         })
         .await;
 
-        match out {
+        match out.payload {
             AsyncPayload::NotDispatched(message) => {
                 assert!(message.contains("[request] timed out after"), "{message}");
                 assert!(message.contains("before dispatch"), "{message}");
@@ -1063,6 +1215,32 @@ mod tests {
             _ => panic!("expired work must be rejected before dispatch"),
         }
         assert!(!ran.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn result_conversion_cannot_complete_after_the_deadline() {
+        let rows = 200_000;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
+        let values = Arc::new(Int64Array::from_iter_values(0..rows));
+        let batch = RecordBatch::try_new(schema, vec![values]).unwrap();
+        let permits = Semaphore::new(1);
+        let dispatched = Arc::new(AtomicBool::new(true));
+        let work_dispatched = Arc::clone(&dispatched);
+        let deadline = deadline_after(Duration::from_millis(1));
+
+        let out = run_bounded(deadline, &permits, &dispatched, async move {
+            convert_result_batches(vec![batch], deadline, &work_dispatched).await
+        })
+        .await;
+
+        assert!(
+            matches!(out.payload, AsyncPayload::Error(message) if message.contains("timed out after")),
+            "result conversion completed after the request deadline"
+        );
     }
 
     /// The cap is a node-level setting: a nonsensical value falls back to the
@@ -1098,7 +1276,7 @@ mod tests {
         let elapsed = started.elapsed();
 
         match out {
-            AsyncPayload::Error(msg) => {
+            Err(AsyncPayload::Error(msg)) => {
                 assert!(msg.contains("cancelled"), "unexpected error: {msg}");
             }
             _ => panic!("a cancelled operation must not run to completion"),
@@ -1118,7 +1296,7 @@ mod tests {
         )
         .await
         .expect("cancellation was lost before subscription");
-        assert!(matches!(out, AsyncPayload::Error(message) if message.contains("cancelled")));
+        assert!(matches!(out, Err(AsyncPayload::Error(message)) if message.contains("cancelled")));
     }
 
     /// `max_in_flight` is an arbitrary decoded integer and `Semaphore::new` panics

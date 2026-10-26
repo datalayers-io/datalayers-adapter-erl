@@ -54,12 +54,20 @@ all() ->
 groups() ->
     TCs = [
         t_connect_test,
+        t_connect_nif_rejects_out_of_range_port,
         t_stop_test,
         t_use_database,
         t_prepare_test,
         t_invalid_ref_test,
         t_oversized_sql_is_rejected,
         t_prepare_invalid_params_test,
+        t_prepare_accepts_small_integer_boundaries,
+        t_prepare_rejects_out_of_range_int8,
+        t_prepare_rejects_int8_below_minimum,
+        t_prepare_rejects_out_of_range_uint8,
+        t_prepare_rejects_out_of_range_int16,
+        t_prepare_rejects_int16_below_minimum,
+        t_prepare_rejects_out_of_range_uint16,
         t_prepare_with_null_test,
         t_empty_batch,
         t_prepare_auto_rebuild_test,
@@ -156,6 +164,21 @@ t_connect_test(Config) ->
     ?assert(is_pid(Client)),
     _ = datalayers:stop(Client),
     ok.
+
+t_connect_nif_rejects_out_of_range_port(Config) ->
+    Id = erlang:unique_integer([monotonic, positive]),
+    Token = datalayers_nif:new_cancel_token(),
+    Opts = (?conn_opts(Config))#{port => 65536},
+    try
+        ?assertError(
+            badarg,
+            datalayers_nif:async_connect(
+                self(), Id, nif_request(1000), Token, Opts
+            )
+        )
+    after
+        _ = datalayers_nif:cancel(Token)
+    end.
 
 t_stop_test(Config) ->
     {ok, Client} = datalayers:connect(?conn_opts(Config)),
@@ -285,6 +308,78 @@ t_prepare_invalid_params_test(Config) ->
 
     {ok, _} = datalayers:close_prepared(Client, PreparedStatement),
     ok = datalayers:stop(Client).
+
+t_prepare_accepts_small_integer_boundaries(Config) ->
+    with_small_integer_statement(Config, fun(Client, PreparedStatement) ->
+        Timestamp = erlang:system_time(millisecond),
+        Result =
+            datalayers:execute_prepare(Client, PreparedStatement, [
+                [Timestamp, 1, -128, 0, -32768, 0],
+                [Timestamp + 1, 2, 127, 255, 32767, 65535]
+            ]),
+        ?assertMatch({ok, _}, Result)
+    end).
+
+t_prepare_rejects_out_of_range_int8(Config) ->
+    {ok, Client} = datalayers:connect(?conn_opts(Config)),
+    {ok, PreparedStatement} = datalayers:prepare(
+        Client, ?insert_prepare_sql_statement(Config)
+    ),
+    try
+        Result =
+            datalayers:execute_prepare(Client, PreparedStatement, [
+                [erlang:system_time(millisecond), 1, 42.0, 128]
+            ]),
+        ?assertEqual({error, <<"badarg">>}, Result)
+    after
+        _ = datalayers:close_prepared(Client, PreparedStatement),
+        ok = datalayers:stop(Client)
+    end.
+
+t_prepare_rejects_int8_below_minimum(Config) ->
+    with_small_integer_statement(Config, fun(Client, PreparedStatement) ->
+        Result =
+            datalayers:execute_prepare(Client, PreparedStatement, [
+                [erlang:system_time(millisecond), 1, -129, null, null, null]
+            ]),
+        ?assertEqual({error, <<"badarg">>}, Result)
+    end).
+
+t_prepare_rejects_out_of_range_uint8(Config) ->
+    with_small_integer_statement(Config, fun(Client, PreparedStatement) ->
+        Result =
+            datalayers:execute_prepare(Client, PreparedStatement, [
+                [erlang:system_time(millisecond), 1, null, 256, null, null]
+            ]),
+        ?assertEqual({error, <<"badarg">>}, Result)
+    end).
+
+t_prepare_rejects_out_of_range_int16(Config) ->
+    with_small_integer_statement(Config, fun(Client, PreparedStatement) ->
+        Result =
+            datalayers:execute_prepare(Client, PreparedStatement, [
+                [erlang:system_time(millisecond), 1, null, null, 32768, null]
+            ]),
+        ?assertEqual({error, <<"badarg">>}, Result)
+    end).
+
+t_prepare_rejects_int16_below_minimum(Config) ->
+    with_small_integer_statement(Config, fun(Client, PreparedStatement) ->
+        Result =
+            datalayers:execute_prepare(Client, PreparedStatement, [
+                [erlang:system_time(millisecond), 1, null, null, -32769, null]
+            ]),
+        ?assertEqual({error, <<"badarg">>}, Result)
+    end).
+
+t_prepare_rejects_out_of_range_uint16(Config) ->
+    with_small_integer_statement(Config, fun(Client, PreparedStatement) ->
+        Result =
+            datalayers:execute_prepare(Client, PreparedStatement, [
+                [erlang:system_time(millisecond), 1, null, null, null, 65536]
+            ]),
+        ?assertEqual({error, <<"badarg">>}, Result)
+    end).
 
 t_prepare_with_null_test(Config) ->
     {ok, Client} = datalayers:connect(?conn_opts(Config)),
@@ -984,6 +1079,45 @@ cleanup(Client, SQL) ->
                 nomatch -> ct:fail("cleanup failed: ~p: ~p", [SQL, Error]);
                 _ -> ok
             end
+    end.
+
+small_integer_table(Config) ->
+    <<(?table(Config))/binary, "_small_ints">>.
+
+with_small_integer_statement(Config, Fun) ->
+    {ok, Client} = datalayers:connect(?conn_opts(Config)),
+    Table = small_integer_table(Config),
+    Create =
+        iolist_to_binary(
+            io_lib:format(
+                "CREATE TABLE ~s.~s ("
+                "ts TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+                "sid INT32, "
+                "i8 INT8, u8 UINT8, i16 INT16, u16 UINT16, "
+                "timestamp key(ts)"
+                ") PARTITION BY HASH(sid) PARTITIONS 1 ENGINE=TimeSeries",
+                [?database(Config), Table]
+            )
+        ),
+    {ok, _} = do_execute(Client, Create),
+    Insert =
+        iolist_to_binary(
+            io_lib:format(
+                "INSERT INTO ~s.~s (ts, sid, i8, u8, i16, u16) VALUES (?, ?, ?, ?, ?, ?)",
+                [?database(Config), Table]
+            )
+        ),
+    {ok, PreparedStatement} = datalayers:prepare(Client, Insert),
+    try
+        Fun(Client, PreparedStatement)
+    after
+        _ = datalayers:close_prepared(Client, PreparedStatement),
+        Drop =
+            iolist_to_binary(
+                io_lib:format("DROP TABLE IF EXISTS ~s.~s", [?database(Config), Table])
+            ),
+        _ = datalayers:execute(Client, Drop),
+        ok = datalayers:stop(Client)
     end.
 
 do_execute(Client, SQL) ->

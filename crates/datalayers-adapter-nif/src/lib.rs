@@ -8,6 +8,9 @@ mod resource;
 mod types;
 mod util;
 
+#[cfg(all(test, target_os = "linux"))]
+mod nif_symbol_stubs;
+
 use crate::resource::CancelToken;
 use crate::resource::{ClientResource, PreparedStatementResource};
 use arrow_array::RecordBatch;

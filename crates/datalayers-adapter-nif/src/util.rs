@@ -1,10 +1,9 @@
 use crate::types::{append_value_to_builder, get_array_builder};
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_cast::display::array_value_to_string;
-use arrow_flight::sql::client::PreparedStatement;
+use arrow_schema::Schema;
 use rustler::{Error, NifResult, Term, types::list::ListIterator};
 use std::sync::Arc;
-use tonic::transport::Channel;
 
 pub fn record_batch_to_term(batches: &[RecordBatch]) -> Vec<Vec<String>> {
     let mut result: Vec<Vec<String>> = Vec::new();
@@ -21,17 +20,7 @@ pub fn record_batch_to_term(batches: &[RecordBatch]) -> Vec<Vec<String>> {
     result
 }
 
-pub fn params_to_record_batch(
-    prepared_stmt: &PreparedStatement<Channel>,
-    term: Term,
-) -> Result<RecordBatch, Error> {
-    let schema = Arc::new(
-        prepared_stmt
-            .parameter_schema()
-            .map_err(|e| Error::Term(Box::new(e.to_string())))?
-            .clone(),
-    );
-
+pub fn params_to_record_batch(schema: Arc<Schema>, term: Term) -> Result<RecordBatch, Error> {
     let list_iterator: ListIterator = term.decode()?;
     let matrix: Vec<Vec<Term>> = list_iterator
         .map(|row_term| row_term.decode::<Vec<Term>>())

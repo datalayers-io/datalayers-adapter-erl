@@ -52,7 +52,7 @@ connect(Opts) ->
             Err
     end.
 
--spec use_database(client(), binary()) -> ok.
+-spec use_database(client(), binary()) -> {ok, binary()} | {error, reason()}.
 use_database(Client, DbName) ->
     case datalayers:execute(Client, <<"SHOW DATABASES">>) of
         {ok, DBs} ->
@@ -126,6 +126,10 @@ call(Client, _Fun = Cmd, Args) ->
 -spec async(client(), command(), list(), callback()) -> ok.
 async(Client, _Fun = Cmd, Args, ResultCallback) ->
     _ = erlang:send(Client, ?ASYNC_REQ(Cmd, Args, ResultCallback)),
+    %% The socket pid is deliberately not returned here: exposing it so that
+    %% emqx_resource_buffer_worker can monitor the socket is the connector's job
+    %% (it already receives the pid from ecpool and wraps it), which keeps this
+    %% library's public contract unchanged for every other caller.
     ok.
 
 with_out_async(Func) ->

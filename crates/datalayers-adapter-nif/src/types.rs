@@ -10,7 +10,7 @@ use rustler::{Decoder, Error, Term};
 
 macro_rules! define_type_handling_functions {
     (
-        standard_types: [ $( ($dt:ident, $builder:ident, $rust_ty:ty) ),* $(,)? ],
+        standard_types: [ $( ($dt:ident, $builder:ident, $rust_ty:ty, $decode_ty:ty) ),* $(,)? ],
         timestamp_types: [ $( ($unit:ident, $ts_builder:ident) ),* $(,)? ]
     ) => {
         pub fn get_array_builder(data_type: &DataType) -> Result<Box<dyn ArrayBuilder>, Error> {
@@ -37,7 +37,7 @@ macro_rules! define_type_handling_functions {
             match data_type {
                 $(
                     DataType::$dt => {
-                        let val = decode_term_to_option::<$rust_ty>(term)?;
+                        let val = decode_term_to_option::<$rust_ty, $decode_ty>(term)?;
                         builder
                             .as_any_mut()
                             .downcast_mut::<$builder>()
@@ -47,7 +47,7 @@ macro_rules! define_type_handling_functions {
                 )*
                 $(
                     DataType::Timestamp(TimeUnit::$unit, _) => {
-                        let val = decode_term_to_option::<i64>(term)?;
+                        let val = decode_term_to_option::<i64, i64>(term)?;
                         builder
                             .as_any_mut()
                             .downcast_mut::<$ts_builder>()
@@ -69,18 +69,18 @@ macro_rules! define_type_handling_functions {
 // https://docs.datalayers.cn/datalayers/latest/sql-reference/data-type.html
 define_type_handling_functions! {
     standard_types: [
-        (Int8, Int8Builder, i8),
-        (Int16, Int16Builder, i16),
-        (Int32, Int32Builder, i32),
-        (Int64, Int64Builder, i64),
-        (UInt8, UInt8Builder, u8),
-        (UInt16, UInt16Builder, u16),
-        (UInt32, UInt32Builder, u32),
-        (UInt64, UInt64Builder, u64),
-        (Float32, Float32Builder, f32),
-        (Float64, Float64Builder, f64),
-        (Boolean, BooleanBuilder, bool),
-        (Utf8, StringBuilder, String),
+        (Int8, Int8Builder, i8, i32),
+        (Int16, Int16Builder, i16, i32),
+        (Int32, Int32Builder, i32, i32),
+        (Int64, Int64Builder, i64, i64),
+        (UInt8, UInt8Builder, u8, u32),
+        (UInt16, UInt16Builder, u16, u32),
+        (UInt32, UInt32Builder, u32, u32),
+        (UInt64, UInt64Builder, u64, u64),
+        (Float32, Float32Builder, f32, f32),
+        (Float64, Float64Builder, f64, f64),
+        (Boolean, BooleanBuilder, bool, bool),
+        (Utf8, StringBuilder, String, String),
     ],
     timestamp_types: [
         (Second, TimestampSecondBuilder),
@@ -94,13 +94,15 @@ fn is_null(term: &Term) -> bool {
     term.is_atom() && term.eq(&atoms::null().to_term(term.get_env()))
 }
 
-fn decode_term_to_option<'a, T>(term: Term<'a>) -> Result<Option<T>, Error>
+fn decode_term_to_option<'a, T, D>(term: Term<'a>) -> Result<Option<T>, Error>
 where
-    T: Decoder<'a>,
+    D: Decoder<'a>,
+    T: TryFrom<D>,
 {
     if is_null(&term) {
         Ok(None)
     } else {
-        term.decode::<T>().map(Some)
+        let value = term.decode::<D>()?;
+        T::try_from(value).map(Some).map_err(|_| Error::BadArg)
     }
 }

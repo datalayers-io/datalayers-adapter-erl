@@ -60,7 +60,10 @@ impl<'a> Decoder<'a> for ClientOpts {
         for (key, value) in MapIterator::new(term).ok_or(Error::BadArg)? {
             match key.atom_to_string()?.as_ref() {
                 "host" => opts.host = Some(value.decode()?),
-                "port" => opts.port = Some(value.decode()?),
+                "port" => {
+                    let port = value.decode::<u32>()?;
+                    opts.port = Some(u16::try_from(port).map_err(|_| Error::BadArg)?);
+                }
                 "username" => opts.username = Some(value.decode()?),
                 "password" => opts.password = Some(value.decode()?),
                 "tls_cert" => opts.tls_cert = Some(value.decode()?),

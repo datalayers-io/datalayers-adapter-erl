@@ -352,6 +352,17 @@ mod tests {
     }
 
     #[test]
+    fn ca_path_alone_enables_tls() {
+        let opts = ClientOpts {
+            tls_cacertfile: Some("/test/ca.pem".to_string()),
+            ..Default::default()
+        };
+        assert!(opts.tls_enabled());
+        assert_eq!(opts.protocol(), "https");
+        assert_eq!(opts.validate_tls().unwrap(), Some("/test/ca.pem"));
+    }
+
+    #[test]
     fn verify_none_is_rejected() {
         let opts = ClientOpts {
             verify: Some(TlsVerify::None),
@@ -363,32 +374,99 @@ mod tests {
 
     #[test]
     fn tls_options_are_not_accepted_when_tls_is_disabled() {
-        let opts = ClientOpts {
-            tls_enable: Some(false),
-            ..tls_opts()
-        };
-        let err = opts.validate_tls().unwrap_err();
-        assert!(err.contains("require tls_enable = true"), "{err}");
+        for (name, opts) in [
+            (
+                "ca path",
+                ClientOpts {
+                    tls_enable: Some(false),
+                    tls_cacertfile: Some("/test/ca.pem".to_string()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "verify",
+                ClientOpts {
+                    tls_enable: Some(false),
+                    verify: Some(TlsVerify::Peer),
+                    ..Default::default()
+                },
+            ),
+            (
+                "server name",
+                ClientOpts {
+                    tls_enable: Some(false),
+                    tls_server_name: Some("datalayers.example.com".to_string()),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let err = opts.validate_tls().unwrap_err();
+            assert!(err.contains("require tls_enable = true"), "{name}: {err}");
+        }
     }
 
     #[test]
     fn tls_options_never_downgrade_to_plaintext() {
+        for (name, opts) in [
+            (
+                "verify peer",
+                ClientOpts {
+                    verify: Some(TlsVerify::Peer),
+                    ..Default::default()
+                },
+            ),
+            (
+                "verify none",
+                ClientOpts {
+                    verify: Some(TlsVerify::None),
+                    ..Default::default()
+                },
+            ),
+            (
+                "server name",
+                ClientOpts {
+                    tls_server_name: Some("datalayers.example.com".to_string()),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let err = opts.validate_tls().unwrap_err();
+            assert!(err.contains("require a CA bundle"), "{name}: {err}");
+        }
+    }
+
+    #[test]
+    fn tls_decode_errors_take_precedence_over_the_mode() {
         let opts = ClientOpts {
-            verify: Some(TlsVerify::Peer),
+            tls_enable: Some(false),
+            tls_config_error: Some("tls_enable must be a boolean".to_string()),
             ..Default::default()
         };
-        let err = opts.validate_tls().unwrap_err();
-        assert!(err.contains("require a CA bundle"), "{err}");
+        assert_eq!(
+            opts.validate_tls().unwrap_err(),
+            "tls_enable must be a boolean"
+        );
     }
 
     #[test]
     fn invalid_ca_and_server_name_values_are_rejected() {
         let empty = ClientOpts {
-            tls_cacertfile: Some("  ".to_string()),
+            tls_cacertfile: Some(String::new()),
             ..tls_opts()
         };
         assert!(
             empty
+                .validate_tls()
+                .unwrap_err()
+                .contains("must not be empty")
+        );
+
+        let whitespace = ClientOpts {
+            tls_cacertfile: Some("  ".to_string()),
+            ..tls_opts()
+        };
+        assert!(
+            whitespace
                 .validate_tls()
                 .unwrap_err()
                 .contains("must not be empty")
@@ -411,6 +489,17 @@ mod tests {
         };
         assert!(
             no_name
+                .validate_tls()
+                .unwrap_err()
+                .contains("tls_server_name must not be empty")
+        );
+
+        let whitespace_name = ClientOpts {
+            tls_server_name: Some("  ".to_string()),
+            ..tls_opts()
+        };
+        assert!(
+            whitespace_name
                 .validate_tls()
                 .unwrap_err()
                 .contains("tls_server_name must not be empty")

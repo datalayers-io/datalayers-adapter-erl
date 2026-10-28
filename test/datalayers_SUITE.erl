@@ -55,11 +55,13 @@ groups() ->
     TCs = [
         t_connect_test,
         t_connect_nif_rejects_out_of_range_port,
+        t_connect_nif_rejects_malformed_options,
         t_stop_test,
         t_use_database,
         t_prepare_test,
         t_invalid_ref_test,
         t_oversized_sql_is_rejected,
+        t_non_binary_sql_is_rejected,
         t_prepare_invalid_params_test,
         t_prepare_accepts_small_integer_boundaries,
         t_prepare_rejects_out_of_range_int8,
@@ -101,6 +103,7 @@ groups() ->
         t_connect_tls_read_timeout_is_not_dispatched,
         t_docker_command_failures_are_reported,
         t_tls_options_are_validated,
+        t_tls_option_types_are_rejected,
         t_tls_cert_is_rejected,
         t_tls_server_name_override
     ],
@@ -187,6 +190,31 @@ t_connect_nif_rejects_out_of_range_port(Config) ->
     after
         _ = datalayers_nif:cancel(Token)
     end.
+
+t_connect_nif_rejects_malformed_options(_Config) ->
+    Base = #{
+        host => <<"127.0.0.1">>,
+        port => 1,
+        username => <<"admin">>,
+        password => <<"public">>,
+        timeout => 200,
+        request_timeout => 200
+    },
+    Cases = [
+        {options_not_a_map, []},
+        {non_atom_key, Base#{<<"host">> => <<"127.0.0.1">>}},
+        {host_not_a_binary, Base#{host => 42}},
+        {port_negative, Base#{port => -1}},
+        {port_not_an_integer, Base#{port => <<"8360">>}},
+        {port_too_large, Base#{port => 1 bsl 32}},
+        {username_not_a_binary, Base#{username => admin}},
+        {password_not_a_binary, Base#{password => 42}}
+    ],
+    lists:foreach(
+        fun({Name, Opts}) -> assert_connect_nif_badarg(Name, Opts) end,
+        Cases
+    ),
+    assert_nif_alive().
 
 t_stop_test(Config) ->
     {ok, Client} = datalayers:connect(?conn_opts(Config)),
@@ -299,6 +327,26 @@ t_oversized_sql_is_rejected(_Config) ->
         ok = datalayers:stop(Sock)
     end.
 
+t_non_binary_sql_is_rejected(_Config) ->
+    {ok, Sock} = datalayers_sock:start(),
+    Expected = {error, {invalid_sql, expected_binary}},
+    try
+        lists:foreach(
+            fun(Sql) ->
+                ?assertEqual(Expected, datalayers:execute(Sock, Sql)),
+                ?assertEqual(Expected, datalayers:prepare(Sock, Sql)),
+                ok = datalayers:async_execute(Sock, Sql, async_reply_fun(self())),
+                ?assertEqual(Expected, receive_async_result(1000)),
+                ok = datalayers:async_prepare(Sock, Sql, async_reply_fun(self())),
+                ?assertEqual(Expected, receive_async_result(1000))
+            end,
+            [select_1, 42, [<<"SELECT ">>, <<"1">>], #{sql => <<"SELECT 1">>}]
+        ),
+        assert_nif_alive()
+    after
+        ok = datalayers:stop(Sock)
+    end.
+
 t_prepare_invalid_params_test(Config) ->
     {ok, Client} = datalayers:connect(?conn_opts(Config)),
     {ok, PreparedStatement} = datalayers:prepare(
@@ -313,6 +361,28 @@ t_prepare_invalid_params_test(Config) ->
     %% Case 2: Too many parameters
     ParamsLong = [[erlang:system_time(millisecond), 1, 42.0, 1, <<"extra">>]],
     ?assertMatch({error, _}, datalayers:execute_prepare(Client, PreparedStatement, ParamsLong)),
+
+    %% Cases 3-6: malformed container shapes and value types.
+    InvalidParams = [
+        not_a_list,
+        [not_a_row],
+        [],
+        [[erlang:system_time(millisecond), <<"1">>, <<"42.0">>, true]]
+    ],
+    lists:foreach(
+        fun(Params) ->
+            ?assertMatch(
+                {error, _},
+                datalayers:execute_prepare(Client, PreparedStatement, Params)
+            )
+        end,
+        InvalidParams
+    ),
+
+    %% A rejected binding must not poison the prepared statement or socket.
+    ValidParams = [[erlang:system_time(millisecond), 1, 42.0, 1]],
+    ?assertMatch({ok, _}, datalayers:execute_prepare(Client, PreparedStatement, ValidParams)),
+    assert_nif_alive(),
 
     {ok, _} = datalayers:close_prepared(Client, PreparedStatement),
     ok = datalayers:stop(Client).
@@ -1048,23 +1118,122 @@ t_tls_options_are_validated(_Config) ->
         timeout => 200,
         request_timeout => 200
     },
-    MissingCA = Base#{tls_enable => true, verify => verify_peer},
-    ?assert(connect_error_contains(MissingCA, <<"tls_cacertfile is required">>)),
-
-    VerifyNone = Base#{
-        tls_enable => true,
-        tls_cacertfile => <<"/etc/ssl/certs/ca-certificates.crt">>,
-        verify => verify_none
-    },
-    ?assert(connect_error_contains(VerifyNone, <<"verify_none is not supported">>)),
-
-    Disabled = Base#{
-        tls_enable => false,
-        tls_cacertfile => <<"/etc/ssl/certs/ca-certificates.crt">>,
-        verify => verify_peer
-    },
-    ?assert(connect_error_contains(Disabled, <<"require tls_enable = true">>)),
+    Cases = [
+        {
+            missing_ca,
+            Base#{tls_enable => true, verify => verify_peer},
+            <<"tls_cacertfile is required">>
+        },
+        {
+            verify_none,
+            Base#{
+                tls_enable => true,
+                tls_cacertfile => <<"/test/ca.pem">>,
+                verify => verify_none
+            },
+            <<"verify_none is not supported">>
+        },
+        {
+            disabled_ca,
+            Base#{tls_enable => false, tls_cacertfile => <<"/test/ca.pem">>},
+            <<"require tls_enable = true">>
+        },
+        {
+            disabled_verify,
+            Base#{tls_enable => false, verify => verify_peer},
+            <<"require tls_enable = true">>
+        },
+        {
+            disabled_server_name,
+            Base#{tls_enable => false, tls_server_name => <<"datalayers.example.com">>},
+            <<"require tls_enable = true">>
+        },
+        {
+            verify_without_ca,
+            Base#{verify => verify_peer},
+            <<"require a CA bundle">>
+        },
+        {
+            server_name_without_ca,
+            Base#{tls_server_name => <<"datalayers.example.com">>},
+            <<"require a CA bundle">>
+        },
+        {
+            empty_ca,
+            Base#{tls_enable => true, tls_cacertfile => <<>>},
+            <<"must not be empty">>
+        },
+        {
+            relative_ca,
+            Base#{tls_enable => true, tls_cacertfile => <<"relative/ca.pem">>},
+            <<"must be an absolute path">>
+        },
+        {
+            empty_server_name,
+            Base#{
+                tls_enable => true,
+                tls_cacertfile => <<"/test/ca.pem">>,
+                tls_server_name => <<>>
+            },
+            <<"tls_server_name must not be empty">>
+        }
+    ],
+    lists:foreach(
+        fun({Name, Opts, Needle}) ->
+            assert_connect_error_contains(Name, Opts, Needle)
+        end,
+        Cases
+    ),
+    assert_nif_alive(),
     ok.
+
+t_tls_option_types_are_rejected(_Config) ->
+    Base = #{
+        host => <<"127.0.0.1">>,
+        port => 1,
+        username => <<"admin">>,
+        password => <<"public">>,
+        timeout => 200,
+        request_timeout => 200,
+        tls_enable => true,
+        tls_cacertfile => <<"/test/ca.pem">>
+    },
+    Cases = [
+        {tls_enable_integer, Base#{tls_enable => 1}, <<"tls_enable must be a boolean">>},
+        {
+            tls_cacertfile_integer,
+            Base#{tls_cacertfile => 42},
+            <<"tls_cacertfile must be a string">>
+        },
+        {verify_boolean, Base#{verify => true}, <<"verify must be verify_peer">>},
+        {
+            verify_unknown_atom,
+            Base#{verify => verify_other},
+            <<"verify must be verify_peer">>
+        },
+        {
+            tls_server_name_integer,
+            Base#{tls_server_name => 42},
+            <<"tls_server_name must be a string">>
+        },
+        {
+            certfile_unsupported,
+            Base#{certfile => <<"/test/client.crt">>},
+            <<"TLS client certificates are not supported">>
+        },
+        {
+            keyfile_unsupported,
+            Base#{keyfile => <<"/test/client.key">>},
+            <<"TLS client certificates are not supported">>
+        }
+    ],
+    lists:foreach(
+        fun({Name, Opts, Needle}) ->
+            assert_connect_error_contains(Name, Opts, Needle)
+        end,
+        Cases
+    ),
+    assert_nif_alive().
 
 t_tls_cert_is_rejected(_Config) ->
     Base = #{
@@ -1226,6 +1395,40 @@ connect_error_contains(Opts, Needle) ->
             ok = datalayers:stop(Client),
             false
     end.
+
+assert_connect_error_contains(Name, Opts, Needle) ->
+    case datalayers:connect(Opts) of
+        {error, Reason} ->
+            case binary:match(reason_text(Reason), Needle) of
+                nomatch ->
+                    ct:fail("~p: expected ~p in ~p", [Name, Needle, Reason]);
+                _ ->
+                    ok
+            end;
+        {ok, Client} ->
+            ok = datalayers:stop(Client),
+            ct:fail("~p: expected a connection error", [Name])
+    end.
+
+assert_connect_nif_badarg(Name, Opts) ->
+    Id = erlang:unique_integer([monotonic, positive]),
+    Token = datalayers_nif:new_cancel_token(),
+    try
+        Result = datalayers_nif:async_connect(
+            self(), Id, nif_request(200), Token, Opts
+        ),
+        ct:fail("~p: expected badarg, got ~p", [Name, Result])
+    catch
+        error:badarg ->
+            ok
+    after
+        _ = datalayers_nif:cancel(Token)
+    end,
+    assert_nif_alive().
+
+assert_nif_alive() ->
+    Token = datalayers_nif:new_cancel_token(),
+    ?assertEqual(ok, datalayers_nif:cancel(Token)).
 
 reason_text({not_dispatched, Reason}) ->
     Reason;

@@ -57,10 +57,32 @@ Opts = #{
     port => 8360,
     username => <<"admin">>,
     password => <<"public">>,
-    tls_cert => <<"/path/to/ca.crt">>
+    tls_enable => true,
+    tls_cacertfile => <<"/path/to/ca-bundle.pem">>,
+    verify => verify_peer,
+    tls_server_name => <<"datalayers.example.com">>
 },
 {ok, Client} = datalayers:connect(Opts).
 ```
+
+TLS never falls back to a built-in Mozilla, webpki, or operating-system trust
+store. The caller must provide an absolute path to the PEM CA bundle in
+`tls_cacertfile`. The bundle may contain multiple CA certificates.
+
+- `tls_enable` explicitly selects TLS. A CA path without this option still
+  enables TLS for compatibility with older callers.
+- `verify` must be `verify_peer`. `verify_none` is rejected because the Arrow
+  Flight client always verifies the server certificate chain and hostname.
+- `tls_server_name` overrides the name used for SNI and hostname verification.
+  It defaults to `host`.
+
+> [!WARNING]
+> `tls_cert` is no longer accepted as a CA alias. Rename existing configurations
+> to use `tls_cacertfile`. The `tls_cert` name is reserved for a possible future
+> client certificate option and must not be used for a CA bundle.
+
+Mutual TLS is not supported by the Datalayers server. Client certificate
+options (`certfile` and `keyfile`) must not be supplied to this driver.
 
 **Optional settings:**
 

@@ -99,7 +99,10 @@ groups() ->
         t_stopping_during_connect_cancels_the_attempt,
         t_killing_while_connecting_cancels_the_attempt,
         t_connect_tls_read_timeout_is_not_dispatched,
-        t_docker_command_failures_are_reported
+        t_docker_command_failures_are_reported,
+        t_tls_options_are_validated,
+        t_tls_cert_is_rejected,
+        t_tls_server_name_override
     ],
     [
         {tcp, TCs},
@@ -141,7 +144,12 @@ init_per_group(tls, Config) ->
         port => 8360,
         username => <<"admin">>,
         password => <<"public">>,
-        tls_cert => Cacertfile
+        tls_enable => true,
+        tls_cacertfile => Cacertfile,
+        verify => verify_peer,
+        %% The testbed listens on an address that is not in the certificate SAN,
+        %% so the certificate name has to be given explicitly.
+        tls_server_name => <<"datalayers_tls">>
     },
     [{conn_opts, ConnOpts}, {container, "datalayers_tls"} | Config].
 
@@ -1002,7 +1010,9 @@ t_connect_tls_read_timeout_is_not_dispatched(_Config) ->
                     port => 1,
                     username => <<"admin">>,
                     password => <<"public">>,
-                    tls_cert => list_to_binary(Path),
+                    tls_enable => true,
+                    tls_cacertfile => list_to_binary(Path),
+                    verify => verify_peer,
                     timeout => 60000,
                     request_timeout => 200
                 },
@@ -1027,6 +1037,75 @@ t_docker_command_failures_are_reported(_Config) ->
         ?assertMatch({error, _}, docker(["pause", "no_such_container"]))
     after
         true = os:putenv("PATH", OldPath)
+    end.
+
+t_tls_options_are_validated(_Config) ->
+    Base = #{
+        host => <<"127.0.0.1">>,
+        port => 1,
+        username => <<"admin">>,
+        password => <<"public">>,
+        timeout => 200,
+        request_timeout => 200
+    },
+    MissingCA = Base#{tls_enable => true, verify => verify_peer},
+    ?assert(connect_error_contains(MissingCA, <<"tls_cacertfile is required">>)),
+
+    VerifyNone = Base#{
+        tls_enable => true,
+        tls_cacertfile => <<"/etc/ssl/certs/ca-certificates.crt">>,
+        verify => verify_none
+    },
+    ?assert(connect_error_contains(VerifyNone, <<"verify_none is not supported">>)),
+
+    Disabled = Base#{
+        tls_enable => false,
+        tls_cacertfile => <<"/etc/ssl/certs/ca-certificates.crt">>,
+        verify => verify_peer
+    },
+    ?assert(connect_error_contains(Disabled, <<"require tls_enable = true">>)),
+    ok.
+
+t_tls_cert_is_rejected(_Config) ->
+    Base = #{
+        host => <<"127.0.0.1">>,
+        port => 1,
+        username => <<"admin">>,
+        password => <<"public">>,
+        timeout => 200,
+        request_timeout => 200
+    },
+    ?assert(
+        connect_error_contains(
+            Base#{tls_enable => true, tls_cert => <<"/test/ca.pem">>},
+            <<"tls_cert is not supported">>
+        )
+    ),
+    ?assert(
+        connect_error_contains(
+            Base#{
+                tls_enable => true,
+                tls_cacertfile => <<"/test/ca.pem">>,
+                tls_cert => <<"/test/ca.pem">>
+            },
+            <<"tls_cert is not supported">>
+        )
+    ),
+    ok.
+
+t_tls_server_name_override(Config) ->
+    case ?conn_opts(Config) of
+        #{tls_cacertfile := _} = ConnOpts ->
+            %% Same address without the explicit certificate name: the certificate
+            %% is not valid for it, so the connection must be refused.
+            ?assertMatch({error, _}, datalayers:connect(maps:remove(tls_server_name, ConnOpts))),
+            %% With the name given, verification succeeds against the DNS SAN.
+            {ok, Client} = datalayers:connect(ConnOpts),
+            {ok, [[_Vsn]]} = datalayers:execute(Client, <<"SELECT version()">>),
+            ok = datalayers:stop(Client);
+        _ ->
+            %% plaintext group: nothing to check
+            ok
     end.
 
 %% ================================================================================
@@ -1138,6 +1217,22 @@ receive_async_result(Timeout) ->
 
 nif_request(TimeoutMs) ->
     {erlang:monotonic_time(millisecond) + TimeoutMs, TimeoutMs}.
+
+connect_error_contains(Opts, Needle) ->
+    case datalayers:connect(Opts) of
+        {error, Reason} ->
+            binary:match(reason_text(Reason), Needle) =/= nomatch;
+        {ok, Client} ->
+            ok = datalayers:stop(Client),
+            false
+    end.
+
+reason_text({not_dispatched, Reason}) ->
+    Reason;
+reason_text(Reason) when is_binary(Reason) ->
+    Reason;
+reason_text(Reason) ->
+    iolist_to_binary(io_lib:format("~p", [Reason])).
 
 %% Connect straight through the NIF surface and return the client resource ref,
 %% so tests can drive the async NIF entry points without a socket process.
@@ -1261,7 +1356,7 @@ wait_for_port(Port, Timeout) ->
     end.
 
 %% Options for a plain TCP connection to a local silent server. Deliberately built
-%% from scratch so the TLS group does not leak a tls_cert into this test.
+%% from scratch so the TLS group does not leak TLS options into this test.
 silent_conn_opts(Port, Timeout) ->
     silent_conn_opts(Port, Timeout, undefined).
 

@@ -3,7 +3,15 @@
     port := integer(),
     username := binary(),
     password := binary(),
-    tls_cert => binary(),
+    %% Explicit TLS switch. When omitted, a CA path still enables TLS for
+    %% backward compatibility.
+    tls_enable => boolean(),
+    %% PEM CA bundle used to verify the Datalayers server certificate.
+    tls_cacertfile => binary(),
+    %% Peer certificate and hostname verification are mandatory.
+    verify => verify_peer,
+    %% Name used for SNI and certificate hostname verification. Defaults to host.
+    tls_server_name => binary(),
     %% Per-stage flight timeout, in milliseconds.
     timeout => non_neg_integer(),
     %% Whole-request deadline, in milliseconds.

@@ -41,7 +41,9 @@ async fn read_file(path: &str) -> Result<String> {
     })
     .await
     .map_err(|e| anyhow::anyhow!("the certificate read task failed: {e}"))?
-    .context(format!("Failed to read the TLS cert file {path}"))
+    .context(format!(
+        "Failed to read the TLS CA certificate bundle {path}"
+    ))
 }
 
 /// Run `fut`, bounded by `limit`, tagging any error with the flight stage it came
@@ -84,6 +86,7 @@ pub struct Client {
 
 impl Client {
     pub async fn try_new(opts: &ClientOpts, on_network: impl FnOnce()) -> Result<Self> {
+        let ca_path = opts.validate_tls().map_err(anyhow::Error::msg)?;
         let uri = opts.format_uri();
         let timeout = opts.timeout();
         // Deliberately no endpoint-level connect timeout: the `timed` wrapper
@@ -94,15 +97,17 @@ impl Client {
             .context(format!("Failed to create an endpoint with uri {uri}"))?
             .keep_alive_while_idle(true);
 
-        // Configures TLS if a certificate is provided.
-        if let Some(tls_cert) = &opts.tls_cert {
+        // The caller owns the trust decision. Every enabled connection supplies
+        // exactly one explicit CA bundle; no webpki or operating-system roots are
+        // loaded implicitly.
+        if let Some(ca_path) = ca_path {
             // Read on the blocking pool, holding a read slot for the whole read:
             // a synchronous read here would stall a runtime worker, and a read
             // that outlives its request must not be able to pile up unbounded.
-            let cert = read_file(tls_cert).await?;
+            let cert = read_file(ca_path).await?;
             let cert = Certificate::from_pem(cert);
             let tls_config = ClientTlsConfig::new()
-                .domain_name(opts.host.clone().unwrap_or_default())
+                .domain_name(opts.tls_server_name())
                 .ca_certificate(cert);
             endpoint = endpoint
                 .tls_config(tls_config)
@@ -206,7 +211,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::{Client, timed};
-    use crate::client_opts::ClientOpts;
+    use crate::client_opts::{ClientOpts, TlsVerify};
     use std::time::Duration;
 
     #[tokio::test]
@@ -305,6 +310,43 @@ mod tests {
         assert!(elapsed < Duration::from_secs(3), "took {elapsed:?} to fail");
     }
 
+    #[tokio::test]
+    async fn invalid_tls_options_fail_before_network_io() {
+        for opts in [
+            ClientOpts {
+                tls_enable: Some(true),
+                verify: Some(TlsVerify::Peer),
+                ..Default::default()
+            },
+            ClientOpts {
+                tls_enable: Some(true),
+                tls_cacertfile: Some("/etc/ssl/certs/ca-certificates.crt".to_string()),
+                verify: Some(TlsVerify::None),
+                ..Default::default()
+            },
+        ] {
+            let dispatched = std::sync::atomic::AtomicBool::new(false);
+            let err = match Client::try_new(&opts, || {
+                dispatched.store(true, std::sync::atomic::Ordering::Relaxed);
+            })
+            .await
+            {
+                Ok(_) => panic!("invalid TLS options must not create a client"),
+                Err(err) => err,
+            };
+            assert!(
+                err.to_string().contains("TLS")
+                    || err.to_string().contains("tls_")
+                    || err.to_string().contains("verify_"),
+                "unexpected validation error: {err:#}"
+            );
+            assert!(
+                !dispatched.load(std::sync::atomic::Ordering::Relaxed),
+                "network I/O started before TLS validation"
+            );
+        }
+    }
+
     /// The certificate is read before the endpoint is built, and the read must not
     /// be able to outlive the request deadline. A writer that holds a FIFO open
     /// without writing keeps the read blocked; a synchronous read would stall the
@@ -343,7 +385,9 @@ mod tests {
         let opts = ClientOpts {
             host: Some("127.0.0.1".to_string()),
             port: Some(1),
-            tls_cert: Some(fifo.to_string_lossy().to_string()),
+            tls_enable: Some(true),
+            tls_cacertfile: Some(fifo.to_string_lossy().to_string()),
+            verify: Some(TlsVerify::Peer),
             timeout_ms: Some(60000),
             request_timeout_ms: Some(200),
             ..Default::default()

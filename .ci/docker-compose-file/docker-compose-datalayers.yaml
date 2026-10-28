@@ -24,7 +24,9 @@ services:
     restart: always
     networks:
       datalayers_bridge:
-        ipv4_address: 172.100.100.20
+        # Deliberately outside the certificate SAN so the tests must override
+        # the SNI and hostname verification name explicitly.
+        ipv4_address: 172.100.100.30
 
 networks:
   datalayers_bridge:

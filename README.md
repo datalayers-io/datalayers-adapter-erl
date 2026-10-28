@@ -1,7 +1,7 @@
 # Datalayers Adapter for Erlang
 
-[![Erlang/OTP](https://img.shields.io/badge/Erlang/OTP-27-red.svg)](https://www.erlang.org)
-[![Rust](https://img.shields.io/badge/Rust-1.88-orange.svg)](https://www.rust-lang.org)
+[![Erlang/OTP 27](https://img.shields.io/badge/Erlang/OTP-27-red.svg?logo=erlang&logoColor=white)](https://www.erlang.org)
+[![Rust 1.98.1](https://img.shields.io/badge/Rust-1.98.1-orange.svg?logo=rust&logoColor=white)](https://www.rust-lang.org)
 
 `datalayers-adapter-erl` is an Erlang library for connecting to and interacting with [Datalayers](https://datalayers.cn/) databases. It uses a Rust NIF (Native Implemented Function) for high-performance communication with the Datalayers server via the Arrow Flight SQL protocol.
 
